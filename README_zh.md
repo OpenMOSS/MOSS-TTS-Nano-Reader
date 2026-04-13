@@ -23,11 +23,11 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-Nano Reader 是一个基于 [MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) 的本地浏览器朗读应用。它将 Chrome 扩展、本地 Flask 服务、音色元数据映射和适合 CPU 的流式推理组合在一起，让网页内容可以直接在本机被朗读出来。
+MOSS-TTS-Nano Reader 是一个基于 [MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano) 的本地浏览器朗读应用。它将 Chrome 扩展、本地 Flask 服务、音色元数据映射和适合 CPU 的流式推理组合在一起，让网页内容可以直接在本机被朗读出来。
 
 ## 新闻
 
-* 2026.4.13：我们发布 **Nano Reader**，这是一个构建在 **MOSS-TTS-Nano** 之上的浏览器端本地朗读集成项目。
+* 2026.4.13：我们发布 **MOSS-TTS-Nano Reader**，这是一个构建在 **MOSS-TTS-Nano** 之上的浏览器端本地朗读集成项目。
 * 2026.4.10：我们发布了 **MOSS-TTS-Nano**。演示 Space 已在 [OpenMOSS-Team/MOSS-TTS-Nano](https://huggingface.co/spaces/OpenMOSS-Team/MOSS-TTS-Nano) 上线，也可以通过 [openmoss.github.io/MOSS-TTS-Nano-Demo/](https://openmoss.github.io/MOSS-TTS-Nano-Demo/) 查看 demo 和更多细节。
 
 ## 演示
@@ -146,11 +146,19 @@ Nano Reader 默认使用以下固定目录布局：
 - Checkpoint：`MOSS-TTS-Nano-Reader/models/MOSS-TTS-Nano`
 - Audio tokenizer：`MOSS-TTS-Nano-Reader/models/MOSS-Audio-Tokenizer-Nano`
 
-先把官方 Nano-TTS 仓库克隆到项目根目录：
+Nano Reader 现在通过 git submodule 管理 `MOSS-TTS-Nano`。
+
+如果你是第一次克隆本仓库，建议直接连同 submodule 一起拉取：
+
+```bash
+git clone --recurse-submodules <你的 Nano Reader 仓库地址>
+```
+
+如果你已经克隆了 Nano Reader，但当时没有带上 submodule，可以执行：
 
 ```bash
 cd MOSS-TTS-Nano-Reader
-git clone https://github.com/OpenMOSS/MOSS-TTS-Nano.git
+git submodule update --init --recursive
 ```
 
 再把 Hugging Face 模型权重下载到默认本地目录：
@@ -188,7 +196,6 @@ python server.py \
   --nano-tts-repo-path /path/to/MOSS-TTS-Nano \
   --checkpoint-path /path/to/models/MOSS-TTS-Nano \
   --audio-tokenizer-path /path/to/models/MOSS-Audio-Tokenizer-Nano \
-  --attn-implementation eager
 ```
 
 等价的环境变量启动方式：

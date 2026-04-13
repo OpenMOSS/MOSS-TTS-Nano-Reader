@@ -1,0 +1,3 @@
+[submodule "MOSS-TTS-Nano"]
+	path = MOSS-TTS-Nano
+	url = https://github.com/OpenMOSS/MOSS-TTS-Nano.git

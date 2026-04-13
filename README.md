@@ -23,7 +23,7 @@
 
 [English](README.md) | [简体中文](README_zh.md)
 
-Nano Reader is a local browser reading application built on [MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano). It combines a Chrome extension, a local Flask server, curated prompt-voice metadata, and CPU-friendly streaming inference so web pages can be read aloud directly on your own machine.
+MOSS-TTS-Nano Reader is a local browser reading application built on [MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano). It combines a Chrome extension, a local Flask server, curated prompt-voice metadata, and CPU-friendly streaming inference so web pages can be read aloud directly on your own machine.
 
 ## News
 
@@ -147,11 +147,19 @@ Nano Reader defaults to the following fixed layout:
 - Checkpoint: `MOSS-TTS-Nano-Reader/models/MOSS-TTS-Nano`
 - Audio tokenizer: `MOSS-TTS-Nano-Reader/models/MOSS-Audio-Tokenizer-Nano`
 
-Clone the official Nano-TTS repository into the project root:
+Nano Reader now tracks `MOSS-TTS-Nano` as a git submodule.
+
+For a fresh clone of this repository, clone it with submodules:
+
+```bash
+git clone --recurse-submodules <your-nano-reader-repo-url>
+```
+
+If you already cloned Nano Reader without submodules, initialize and fetch them with:
 
 ```bash
 cd MOSS-TTS-Nano-Reader
-git clone https://github.com/OpenMOSS/MOSS-TTS-Nano.git
+git submodule update --init --recursive
 ```
 
 Download model weights from Hugging Face into the default local directories:
@@ -189,7 +197,6 @@ python server.py \
   --nano-tts-repo-path /path/to/MOSS-TTS-Nano \
   --checkpoint-path /path/to/models/MOSS-TTS-Nano \
   --audio-tokenizer-path /path/to/models/MOSS-Audio-Tokenizer-Nano \
-  --attn-implementation eager
 ```
 
 Equivalent environment-variable launch:
