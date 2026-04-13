@@ -152,7 +152,7 @@ Nano Reader now tracks `MOSS-TTS-Nano` as a git submodule.
 For a fresh clone of this repository, clone it with submodules:
 
 ```bash
-git clone --recurse-submodules <your-nano-reader-repo-url>
+git clone --recurse-submodules https://github.com/OpenMOSS/MOSS-TTS-Nano-Reader.git
 ```
 
 If you already cloned Nano Reader without submodules, initialize and fetch them with:

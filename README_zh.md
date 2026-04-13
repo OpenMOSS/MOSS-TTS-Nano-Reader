@@ -151,7 +151,7 @@ Nano Reader 现在通过 git submodule 管理 `MOSS-TTS-Nano`。
 如果你是第一次克隆本仓库，建议直接连同 submodule 一起拉取：
 
 ```bash
-git clone --recurse-submodules <你的 Nano Reader 仓库地址>
+git clone --recurse-submodules https://github.com/OpenMOSS/MOSS-TTS-Nano-Reader.git
 ```
 
 如果你已经克隆了 Nano Reader，但当时没有带上 submodule，可以执行：
