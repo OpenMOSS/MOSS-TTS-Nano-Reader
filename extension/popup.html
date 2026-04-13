@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nano Reader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Nano Reader</h1>
+      <div id="server-status" class="status status-checking">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking server...</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- Voice Selection -->
+      <div class="control-group">
+        <label for="voice-select">Voice</label>
+        <select id="voice-select">
+          <optgroup label="Chinese Male">
+            <option value="Junhao">Junhao</option>
+            <option value="Zhiming">Zhiming</option>
+            <option value="Weiguo">Weiguo</option>
+          </optgroup>
+          <optgroup label="Chinese Female">
+            <option value="Xiaoyu">Xiaoyu</option>
+            <option value="Yuewen">Yuewen</option>
+            <option value="Lingyu">Lingyu</option>
+          </optgroup>
+          <optgroup label="English">
+            <option value="Trump">Trump</option>
+            <option value="Ava">Ava</option>
+            <option value="Bella">Bella</option>
+            <option value="Adam">Adam</option>
+            <option value="Nathan">Nathan</option>
+          </optgroup>
+          <optgroup label="Japanese Female">
+            <option value="Sakura">Sakura</option>
+            <option value="Yui">Yui</option>
+            <option value="Aoi">Aoi</option>
+            <option value="Hina">Hina</option>
+            <option value="Mei">Mei</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- Playback Speed Control -->
+      <div id="playback-speed-group" class="control-group">
+        <label for="speed-control">Playback Speed: <span id="speed-value">1.0x</span></label>
+        <input type="range" id="speed-control" min="0.5" max="2.0" step="0.1" value="1.0">
+      </div>
+
+      <details class="advanced-settings">
+        <summary>Generation Options</summary>
+        <div class="settings-grid">
+          <div class="control-group checkbox-group">
+            <label class="checkbox-label" for="realtime-streaming-decode">
+              <input id="realtime-streaming-decode" type="checkbox" checked>
+              <span>Realtime Streaming Decode</span>
+            </label>
+          </div>
+          <div class="control-group checkbox-group">
+            <label class="checkbox-label" for="wetext-processing-enabled">
+              <input id="wetext-processing-enabled" type="checkbox" checked>
+              <span>Enable WeTextProcessing</span>
+            </label>
+          </div>
+          <div class="control-group checkbox-group">
+            <label class="checkbox-label" for="normalize-tts-text-enabled">
+              <input id="normalize-tts-text-enabled" type="checkbox" checked>
+              <span>Enable normalize_tts_text</span>
+            </label>
+          </div>
+          <div class="control-group">
+            <label for="initial-playback-delay">Initial Playback Delay (s)</label>
+            <input id="initial-playback-delay" type="number" min="0" step="0.01" value="0.08">
+          </div>
+          <div class="control-group">
+            <label for="cpu-threads">CPU Threads (0=auto)</label>
+            <input id="cpu-threads" type="number" min="0" step="1" value="0">
+          </div>
+          <div class="control-group">
+            <label for="attn-implementation">Attention Backend</label>
+            <select id="attn-implementation">
+              <option value="model_default">model_default</option>
+              <option value="sdpa">sdpa</option>
+              <option value="eager">eager</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label for="voice-clone-max-text-tokens">Voice Clone Max Text Tokens</label>
+            <input id="voice-clone-max-text-tokens" type="number" min="25" step="1" value="75">
+          </div>
+          <div class="control-group">
+            <label for="tts-max-batch-size">Max TTS Batch Size (0=auto)</label>
+            <input id="tts-max-batch-size" type="number" min="0" step="1" value="0">
+          </div>
+          <div class="control-group">
+            <label for="codec-max-batch-size">Max Codec Batch Size (0=auto)</label>
+            <input id="codec-max-batch-size" type="number" min="0" step="1" value="0">
+          </div>
+        </div>
+        <p class="settings-hint">
+          0 keeps the current default behavior. Set Max TTS Batch Size to 1 to force split chunks to run one by one.
+          Buffered generation keeps chunk order and decodes codec sub-batches no larger than the current TTS batch.
+          Realtime mode keeps output order and uses the smallest active chunk-group width among auto batching, Max TTS Batch Size, and Max Codec Batch Size.
+        </p>
+        <p class="settings-hint">
+          This app is CPU-only. CPU Threads maps to `torch.set_num_threads` for that request. 0 means auto and uses the server default thread count.
+        </p>
+        <p class="settings-hint">
+          CPU Attention Backend options are synchronized with the official CPU-only app: `model_default`, `sdpa`, and `eager`.
+          On CPU, `model_default` currently resolves to `eager`.
+        </p>
+      </details>
+
+      <!-- Start Position Selection -->
+      <div class="control-group" id="start-position-group">
+        <label for="start-position">Start from</label>
+        <select id="start-position" disabled>
+          <option value="0">Beginning</option>
+        </select>
+        <button id="btn-scan" class="btn-small" title="Scan page for paragraphs">Scan</button>
+      </div>
+
+      <div class="control-group" id="now-reading-group">
+        <label for="now-reading-value">Now Reading</label>
+        <div id="now-reading-value" class="readonly-panel is-placeholder">No active paragraph.</div>
+      </div>
+
+      <!-- Reading Time Estimate -->
+      <div id="reading-time" class="reading-time hidden">
+        <span id="reading-time-value"></span>
+      </div>
+
+      <!-- Playback Controls -->
+      <div class="playback-controls">
+        <button id="btn-read" class="btn btn-primary" disabled>
+          <span class="icon icon-play"></span>
+          Read Page
+        </button>
+        <button id="btn-pause" class="btn btn-secondary" disabled>
+          <span class="icon icon-pause"></span>
+          Pause
+        </button>
+        <button id="btn-stop" class="btn btn-secondary" disabled>
+          <span class="icon icon-stop"></span>
+          Stop
+        </button>
+      </div>
+
+      <!-- Progress -->
+      <div id="progress-container" class="progress-container hidden">
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <div id="progress-text" class="progress-text">Preparing...</div>
+      </div>
+
+      <!-- Status Messages -->
+      <div id="message" class="message hidden"></div>
+    </main>
+
+    <footer>
+      <p class="footer-text">Powered by <a href="https://github.com/OpenMOSS/MOSS-TTS-Nano" target="_blank">MOSS-TTS-Nano</a></p>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
