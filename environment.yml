@@ -6,6 +6,7 @@ dependencies:
   - pip
   - git
   - pynini=2.1.6.post1
+  - pyside6
   - pip:
       - -e ./server
       - git+https://github.com/WhizZest/WeTextProcessing.git

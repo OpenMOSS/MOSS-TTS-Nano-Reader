@@ -1,1 +1,3 @@
 models/
+reader-app/logs/
+reader-app/__pycache__/

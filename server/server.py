@@ -917,6 +917,7 @@ def health():
             "nano_tts_repo_path": str(NANO_TTS_REPO_DIR),
             "checkpoint_path": str(runtime.checkpoint_path),
             "audio_tokenizer_path": str(runtime.audio_tokenizer_path),
+            "default_voice": runtime.default_voice,
             "device": str(runtime.device),
             "dtype": str(runtime.dtype),
             "attn_implementation": runtime.attn_implementation,
