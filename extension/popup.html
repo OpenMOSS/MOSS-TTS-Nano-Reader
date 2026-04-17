@@ -12,11 +12,68 @@
       <h1>Nano Reader</h1>
       <div id="server-status" class="status status-checking">
         <span class="status-dot"></span>
-        <span class="status-text">Checking server...</span>
+        <span class="status-text">Checking backend...</span>
       </div>
     </header>
 
     <main>
+      <details class="advanced-settings">
+        <summary>Backend</summary>
+        <div class="settings-grid server-settings-grid">
+          <div class="control-group">
+            <label for="backend-select">Backend</label>
+            <select id="backend-select">
+              <option value="browser_onnx">browser_onnx</option>
+              <option value="server">server</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label for="browser-model-profile">Browser ONNX Model</label>
+            <select id="browser-model-profile">
+              <option value="fp32">Browser ONNX (FP32, parity-first)</option>
+            </select>
+          </div>
+          <div class="control-group">
+            <label for="browser-model-path">Browser ONNX Model Path</label>
+            <input
+              id="browser-model-path"
+              type="text"
+              spellcheck="false"
+              placeholder="models"
+            >
+          </div>
+        </div>
+        <div class="server-settings-actions">
+          <button id="btn-apply-backend-config" class="btn-small btn-small-primary" type="button">Apply Backend</button>
+          <button id="btn-prepare-browser-backend" class="btn-small" type="button">Load And Prepare</button>
+        </div>
+        <p class="settings-hint">
+          `browser_onnx` is the default backend. `Load And Prepare` preloads the browser runtime in the current tab to avoid first-synthesis model load latency.
+        </p>
+        <p class="settings-hint">
+          The default packaged model path in this build is `models`.
+        </p>
+        <p class="settings-hint">
+          If the packaged model directory is missing, `Load And Prepare` will download the Hugging Face ONNX assets into browser-managed storage automatically and switch the backend to that managed path.
+        </p>
+        <p class="settings-hint">
+          `Read Page`, `Reload Voices`, and `Save Voice` now reuse the same auto-download path, so you no longer need to click `Load And Prepare` first just to fetch missing models.
+        </p>
+        <p class="settings-hint">
+          Packaged extension models and browser-managed downloads do not require `Allow access to file URLs`. Only manually entered external local file paths need that permission.
+        </p>
+      </details>
+
+      <details class="advanced-settings">
+        <summary>Browser ONNX PoC</summary>
+        <div class="server-settings-actions">
+          <button id="btn-open-browser-poc" class="btn-small btn-small-primary" type="button">Open Browser PoC</button>
+        </div>
+        <p class="settings-hint">
+          This opens the CPU-only browser ONNX page. It supports built-in voices, uploaded voices, editable text, and warm-up loading without the Python server.
+        </p>
+      </details>
+
       <details class="advanced-settings server-connection-settings">
         <summary>Server Connection</summary>
         <div class="settings-grid server-settings-grid">
@@ -103,8 +160,8 @@
           <button id="btn-cancel-add-voice" class="btn-small" type="button">Cancel</button>
         </div>
         <p class="settings-hint">
-          The server saves uploaded audio into `assets/audio`, appends it to `assets/voice_browser_metadata.json`,
-          generates an internal `voice` id automatically, and makes it available in the voice list immediately.
+          In `browser_onnx` mode, the uploaded prompt audio is encoded locally in the browser and stored in extension storage.
+          In `server` mode, it is uploaded to the Python server like before.
         </p>
       </div>
 
@@ -117,6 +174,13 @@
       <details class="advanced-settings">
         <summary>Generation Options</summary>
         <div class="settings-grid">
+          <div class="control-group">
+            <label for="sample-mode">Sampling Mode</label>
+            <select id="sample-mode">
+              <option value="fixed">Fixed Sampled Frame (Default)</option>
+              <option value="full">Sample Full</option>
+            </select>
+          </div>
           <div class="control-group checkbox-group">
             <label class="checkbox-label" for="realtime-streaming-decode">
               <input id="realtime-streaming-decode" type="checkbox" checked>
@@ -176,6 +240,22 @@
           CPU Attention Backend options are synchronized with the official CPU-only app: `model_default`, `sdpa`, and `eager`.
           On CPU, `model_default` currently resolves to `eager`.
         </p>
+        <p class="settings-hint">
+          Under the <code>browser_onnx</code> backend, <code>Enable WeTextProcessing</code> is still not executable today.
+          The cached <code>.fst</code> files can be reused as assets, but browser inference still needs a browser-side OpenFst/WeText runtime before those graphs can actually run.
+        </p>
+        <p class="settings-hint">
+          Under the <code>server</code> backend, both sampled modes still map to regular <code>do_sample=true</code>.
+          The extra sampled-mode split is only implemented by the <code>browser_onnx</code> runtime.
+        </p>
+        <p class="settings-hint">
+          <code>Fixed Sampled Frame</code> runs a dedicated browser ONNX fast path with host-provided random numbers and graph-internal sampling.
+          Its fixed sampling hyperparameters are: text temp 1.0 / top-p 1.0 / top-k 50, audio temp 0.8 / top-p 0.95 / top-k 25 / repetition penalty 1.2.
+        </p>
+        <p class="settings-hint">
+          When <code>Enable normalize_tts_text</code> is checked, extracted paragraph text is still normalized again before
+          it is sent into browser ONNX inference.
+        </p>
       </details>
 
       <!-- Start Position Selection -->
@@ -190,6 +270,12 @@
       <div class="control-group" id="now-reading-group">
         <label for="now-reading-value">Now Reading</label>
         <div id="now-reading-value" class="readonly-panel is-placeholder">No active paragraph.</div>
+      </div>
+
+      <div class="control-group" id="prepared-text-group">
+        <label for="prepared-text-value">Prepared Text</label>
+        <div id="prepared-text-meta" class="settings-hint">No prepared text yet.</div>
+        <div id="prepared-text-value" class="readonly-panel is-placeholder">No prepared text yet.</div>
       </div>
 
       <!-- Reading Time Estimate -->
@@ -230,6 +316,7 @@
     </footer>
   </div>
 
+  <script src="browser_model_store.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

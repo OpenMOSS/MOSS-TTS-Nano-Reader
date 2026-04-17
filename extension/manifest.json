@@ -11,7 +11,11 @@
   ],
   "host_permissions": [
     "http://localhost/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "file:///*",
+    "https://huggingface.co/*",
+    "https://*.huggingface.co/*",
+    "https://*.hf.co/*"
   ],
   "action": {
     "default_popup": "popup.html",
@@ -44,9 +48,41 @@
       "description": "Stop reading"
     }
   },
+  "options_page": "browser_poc.html",
+  "sandbox": {
+    "pages": [
+      "tokenizer_sandbox.html"
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
+    "sandbox": "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; object-src 'self';"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
   "background": {
     "service_worker": "background.js"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "browser_onnx_host.html",
+        "browser_onnx_host.js",
+        "browser_onnx_runtime.js",
+        "browser_model_store.js",
+        "tokenizer_sandbox.html",
+        "tokenizer_sandbox.js",
+        "vendor/ort/ort.wasm.min.mjs",
+        "vendor/ort/ort-wasm-simd-threaded.mjs",
+        "vendor/ort/ort-wasm-simd-threaded.wasm"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

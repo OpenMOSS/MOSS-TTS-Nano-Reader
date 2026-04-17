@@ -16,6 +16,20 @@ const DEFAULT_SERVER_CONFIG = {
   port: 5050
 };
 
+const DEFAULT_BROWSER_MODEL_VARIANT = 'fp32';
+const CONTENT_SCRIPT_BUILD_ID = '2026-04-16-browser-onnx-normalize-1';
+const SAMPLE_MODE_GREEDY = 'greedy';
+const SAMPLE_MODE_FIXED = 'fixed';
+const SAMPLE_MODE_FULL = 'full';
+const DEFAULT_BROWSER_MODEL_RELATIVE_PATHS = {
+  fp32: 'models'
+};
+const DEFAULT_BACKEND_CONFIG = {
+  backend: 'browser_onnx',
+  browserModelVariant: DEFAULT_BROWSER_MODEL_VARIANT,
+  browserModelPath: DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[DEFAULT_BROWSER_MODEL_VARIANT]
+};
+
 function normalizeServerConfig(rawConfig = {}) {
   const normalizedHost = String(rawConfig?.host || '').trim() === '127.0.0.1'
     ? '127.0.0.1'
@@ -30,6 +44,105 @@ function normalizeServerConfig(rawConfig = {}) {
   };
 }
 
+function getDefaultBrowserModelRelativePath(modelVariant = DEFAULT_BROWSER_MODEL_VARIANT) {
+  return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[modelVariant] || DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[DEFAULT_BROWSER_MODEL_VARIANT];
+}
+
+function normalizeBrowserModelVariant(rawVariant, rawPath = '') {
+  const trimmedVariant = String(rawVariant || '').trim();
+  if (trimmedVariant === 'fp32') {
+    return trimmedVariant;
+  }
+  return DEFAULT_BROWSER_MODEL_VARIANT;
+}
+
+function isAbsoluteFileSystemPath(pathValue) {
+  const normalized = String(pathValue || '').trim();
+  return /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith('\\\\') || normalized.startsWith('/');
+}
+
+function isResourceUrl(pathValue) {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(String(pathValue || '').trim());
+}
+
+function normalizePackagedModelPath(pathValue) {
+  const parts = String(pathValue || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .split('/')
+    .filter(Boolean);
+  const resolvedParts = [];
+  for (const part of parts) {
+    if (part === '.') {
+      continue;
+    }
+    if (part === '..') {
+      if (resolvedParts.length > 0) {
+        resolvedParts.pop();
+      }
+      continue;
+    }
+    resolvedParts.push(part);
+  }
+  return resolvedParts.join('/');
+}
+
+function normalizeStoredBrowserModelPath(rawPath = '') {
+  const normalizedPath = String(rawPath || '').trim();
+  const lowered = normalizedPath.replace(/\\/g, '/').toLowerCase();
+  if (
+    lowered === 'models/browser_onnx_poc_dynamic_int8'
+    || lowered.endsWith('/models/browser_onnx_poc_dynamic_int8')
+  ) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  if (lowered === 'models/browser_onnx_poc' || lowered.endsWith('/models/browser_onnx_poc')) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  if (
+    lowered === 'models/moss-tts-nano-100m-onnx'
+    || lowered === 'models/moss-audio-tokenizer-nano-onnx'
+  ) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  return normalizedPath;
+}
+
+function resolveBrowserModelPath(browserModelPath) {
+  const normalizedPath = String(browserModelPath || '').trim();
+  if (!normalizedPath) {
+    return '';
+  }
+  if (isResourceUrl(normalizedPath)) {
+    return normalizedPath.replace(/\/+$/, '');
+  }
+  if (isAbsoluteFileSystemPath(normalizedPath)) {
+    return normalizedPath.replace(/[\\/]+$/, '');
+  }
+  const packagedPath = normalizePackagedModelPath(normalizedPath);
+  return chrome.runtime.getURL(packagedPath).replace(/\/+$/, '');
+}
+
+function normalizeBackendConfig(rawConfig = {}) {
+  const normalizedBackend = String(rawConfig?.backend || DEFAULT_BACKEND_CONFIG.backend).trim() === 'server'
+    ? 'server'
+    : 'browser_onnx';
+  const normalizedBrowserModelVariant = normalizeBrowserModelVariant(
+    rawConfig?.browserModelVariant,
+    normalizeStoredBrowserModelPath(rawConfig?.browserModelPath)
+  );
+  const normalizedBrowserModelPath = String(
+    normalizeStoredBrowserModelPath(rawConfig?.browserModelPath)
+      || getDefaultBrowserModelRelativePath(normalizedBrowserModelVariant) || ''
+  ).trim();
+  return {
+    backend: normalizedBackend,
+    browserModelVariant: normalizedBrowserModelVariant,
+    browserModelPath: normalizedBrowserModelPath
+  };
+}
+
 function loadServerConfig() {
   return new Promise((resolve) => {
     chrome.storage.local.get(['serverConfig'], (result) => {
@@ -38,6 +151,18 @@ function loadServerConfig() {
         return;
       }
       resolve(normalizeServerConfig(result?.serverConfig));
+    });
+  });
+}
+
+function loadBackendConfig() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['backendConfig'], (result) => {
+      if (chrome.runtime.lastError) {
+        resolve(DEFAULT_BACKEND_CONFIG);
+        return;
+      }
+      resolve(normalizeBackendConfig(result?.backendConfig));
     });
   });
 }
@@ -90,8 +215,22 @@ let selectionAudioElement = null;
 let selectionAudioUrl = null;
 let isReadingSelection = false;
 let selectionStreamAbortController = null;
+let browserOnnxHostFrame = null;
+let browserOnnxHostReadyPromise = null;
+let browserOnnxHostReadyResolver = null;
+let browserOnnxHostRequestCounter = 0;
+const MAX_REALTIME_BUFFERED_SECONDS = 0.45;
+const REALTIME_WAIT_POLL_MS = 25;
+const MAX_PENDING_BROWSER_ONNX_CHUNKS = 3;
+const BROWSER_ONNX_HOST_SOURCE = 'nano-reader-browser-onnx-host';
+const BROWSER_ONNX_HOST_CLIENT_SOURCE = 'nano-reader-browser-onnx-client';
+const BROWSER_ONNX_HOST_IFRAME_ID = 'nano-reader-browser-onnx-host-frame';
+const pendingBrowserOnnxHostRequests = new Map();
+const activeBrowserOnnxHostSyntheses = new Map();
 
 const DEFAULT_TTS_SETTINGS = {
+  sampleMode: SAMPLE_MODE_FIXED,
+  doSample: true,
   realtimeStreamingDecode: true,
   enableWeTextProcessing: true,
   enableNormalizeTtsText: true,
@@ -104,8 +243,25 @@ const DEFAULT_TTS_SETTINGS = {
   codecMaxBatchSize: 0
 };
 
+function normalizeSampleMode(rawSampleMode, rawDoSample = true) {
+  const normalized = String(rawSampleMode || '').trim();
+  if ([SAMPLE_MODE_FIXED, SAMPLE_MODE_FULL].includes(normalized)) {
+    return normalized;
+  }
+  if (normalized === 'greedy' || normalized === 'mixed3') {
+    return SAMPLE_MODE_FIXED;
+  }
+  return SAMPLE_MODE_FIXED;
+}
+
 function normalizeSynthesisSettings(rawSettings = {}) {
-  const normalized = { ...DEFAULT_TTS_SETTINGS, ...(rawSettings || {}) };
+  const source = rawSettings || {};
+  const normalized = { ...DEFAULT_TTS_SETTINGS, ...source };
+  normalized.sampleMode = normalizeSampleMode(
+    source.sampleMode !== undefined ? source.sampleMode : normalized.sampleMode,
+    source.doSample !== undefined ? source.doSample !== false : normalized.doSample !== false
+  );
+  normalized.doSample = true;
   normalized.realtimeStreamingDecode = Boolean(normalized.realtimeStreamingDecode);
   const legacyTextNormalizationEnabled = normalized.textNormalizationEnabled;
   normalized.enableWeTextProcessing = normalized.enableWeTextProcessing !== undefined
@@ -137,6 +293,8 @@ function buildSynthesisPayload(text, voice, settings) {
     text,
     voice,
     mode: 'voice_clone',
+    do_sample: normalized.doSample,
+    sample_mode: normalized.sampleMode,
     enable_text_normalization: normalized.enableWeTextProcessing,
     enable_normalize_tts_text: normalized.enableNormalizeTtsText,
     voice_clone_max_text_tokens: normalized.voiceCloneMaxTextTokens,
@@ -161,6 +319,249 @@ function resolveEffectivePlaybackSpeed(speed, settings = {}) {
   return resolvedSpeed;
 }
 
+function loadBrowserUploadedVoices() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['browserUploadedVoices'], (result) => {
+      if (chrome.runtime.lastError) {
+        resolve([]);
+        return;
+      }
+      resolve(Array.isArray(result?.browserUploadedVoices) ? result.browserUploadedVoices : []);
+    });
+  });
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== browserOnnxHostFrame?.contentWindow) {
+    return;
+  }
+  const payload = event.data;
+  if (!payload || payload.source !== BROWSER_ONNX_HOST_SOURCE) {
+    return;
+  }
+
+  if (payload.type === 'ready') {
+    browserOnnxHostReadyResolver?.();
+    return;
+  }
+
+  if (payload.type === 'audio-chunk') {
+    void enqueueBrowserOnnxHostChunk(payload);
+    return;
+  }
+
+  if (payload.type === 'prepared-text') {
+    const preparedText = payload.preparedText || {};
+    notifyExtension({
+      action: 'preparedText',
+      requestId: payload.requestId,
+      text: preparedText.text || '',
+      rawText: preparedText.rawText || '',
+      normalizationMethod: preparedText.normalizationMethod || 'none',
+      normalizationStages: Array.isArray(preparedText.normalizationStages) ? preparedText.normalizationStages : [],
+      warnings: Array.isArray(preparedText.warnings) ? preparedText.warnings : [],
+      wetextRequested: Boolean(preparedText.wetextRequested),
+      wetextAvailable: Boolean(preparedText.wetextAvailable),
+      wetextApplied: Boolean(preparedText.wetextApplied),
+    });
+    return;
+  }
+
+  if (payload.type !== 'response') {
+    return;
+  }
+
+  const pending = pendingBrowserOnnxHostRequests.get(payload.requestId);
+  if (!pending) {
+    return;
+  }
+  pendingBrowserOnnxHostRequests.delete(payload.requestId);
+  if (payload.ok) {
+    pending.resolve(payload.data || {});
+  } else {
+    pending.reject(new Error(payload.error || 'Browser ONNX host request failed.'));
+  }
+});
+
+function getBrowserOnnxThreadCount(settings = {}) {
+  const normalizedSettings = normalizeSynthesisSettings(settings);
+  return normalizedSettings.cpuThreads > 0
+    ? normalizedSettings.cpuThreads
+    : (navigator.hardwareConcurrency || 4);
+}
+
+async function ensureBrowserOnnxHostFrame() {
+  if (browserOnnxHostFrame?.contentWindow) {
+    return browserOnnxHostFrame;
+  }
+  if (browserOnnxHostReadyPromise) {
+    return browserOnnxHostReadyPromise;
+  }
+
+  browserOnnxHostReadyPromise = new Promise((resolve, reject) => {
+    const existingFrame = document.getElementById(BROWSER_ONNX_HOST_IFRAME_ID);
+    const iframe = existingFrame instanceof HTMLIFrameElement ? existingFrame : document.createElement('iframe');
+    iframe.id = BROWSER_ONNX_HOST_IFRAME_ID;
+    iframe.src = chrome.runtime.getURL('browser_onnx_host.html');
+    iframe.style.position = 'fixed';
+    iframe.style.width = '1px';
+    iframe.style.height = '1px';
+    iframe.style.opacity = '0';
+    iframe.style.pointerEvents = 'none';
+    iframe.style.border = '0';
+    iframe.style.left = '-9999px';
+    iframe.style.top = '-9999px';
+
+    let settled = false;
+    const cleanup = () => {
+      iframe.removeEventListener('error', handleError);
+    };
+    const resolveReady = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      browserOnnxHostFrame = iframe;
+      resolve(iframe);
+    };
+    const handleError = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error('Failed to load browser ONNX host iframe.'));
+    };
+
+    browserOnnxHostReadyResolver = resolveReady;
+    iframe.addEventListener('error', handleError, { once: true });
+    browserOnnxHostFrame = iframe;
+
+    if (!existingFrame) {
+      (document.documentElement || document.body || document).appendChild(iframe);
+    } else if (iframe.contentWindow) {
+      browserOnnxHostFrame = iframe;
+    }
+  }).finally(() => {
+    browserOnnxHostReadyPromise = null;
+    browserOnnxHostReadyResolver = null;
+  });
+
+  return browserOnnxHostReadyPromise;
+}
+
+async function postBrowserOnnxHostRequest(action, data = {}, explicitRequestId = null) {
+  const iframe = await ensureBrowserOnnxHostFrame();
+  if (!iframe.contentWindow) {
+    throw new Error('Browser ONNX host iframe is not ready.');
+  }
+  const requestId = explicitRequestId || `browser-onnx-host-${Date.now()}-${browserOnnxHostRequestCounter += 1}`;
+  return new Promise((resolve, reject) => {
+    pendingBrowserOnnxHostRequests.set(requestId, { resolve, reject });
+    iframe.contentWindow.postMessage({
+      source: BROWSER_ONNX_HOST_CLIENT_SOURCE,
+      action,
+      requestId,
+      ...data,
+    }, '*');
+  });
+}
+
+function acknowledgeBrowserOnnxHostChunk(requestId, chunkId, accepted = true) {
+  const hostWindow = browserOnnxHostFrame?.contentWindow;
+  if (!hostWindow) {
+    return;
+  }
+  hostWindow.postMessage({
+    source: BROWSER_ONNX_HOST_CLIENT_SOURCE,
+    action: 'chunk-ack',
+    requestId,
+    chunkId,
+    accepted,
+  }, '*');
+}
+
+async function cancelBrowserOnnxHostSynthesis(requestId) {
+  if (!requestId) {
+    return;
+  }
+  activeBrowserOnnxHostSyntheses.get(requestId)?.cancel();
+  try {
+    await postBrowserOnnxHostRequest('cancel', { targetRequestId: requestId });
+  } catch (error) {
+    console.debug('Browser ONNX host cancel skipped:', error);
+  }
+}
+
+function getNextBrowserOnnxHostChunk(controller) {
+  if (!controller) {
+    return Promise.resolve(null);
+  }
+  if (controller.chunkQueue.length > 0) {
+    return Promise.resolve(controller.chunkQueue.shift());
+  }
+  if (controller.completed) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    controller.queueResolver = resolve;
+  });
+}
+
+async function enqueueBrowserOnnxHostChunk(payload) {
+  const controller = activeBrowserOnnxHostSyntheses.get(payload.requestId);
+  if (!controller) {
+    acknowledgeBrowserOnnxHostChunk(payload.requestId, payload.chunkId, false);
+    return;
+  }
+
+  while (!controller.cancelled && controller.chunkQueue.length >= MAX_PENDING_BROWSER_ONNX_CHUNKS) {
+    await new Promise((resolve) => setTimeout(resolve, REALTIME_WAIT_POLL_MS));
+  }
+
+  if (controller.cancelled) {
+    acknowledgeBrowserOnnxHostChunk(payload.requestId, payload.chunkId, false);
+    return;
+  }
+
+  const chunkData = Array.isArray(payload.buffers)
+    ? payload.buffers.map((buffer) => new Float32Array(buffer))
+    : [];
+  const chunk = {
+    channels: payload.channels,
+    sampleRate: payload.sampleRate,
+    chunkData,
+    isPause: Boolean(payload.isPause),
+  };
+
+  if (controller.queueResolver) {
+    const resolve = controller.queueResolver;
+    controller.queueResolver = null;
+    resolve(chunk);
+  } else {
+    controller.chunkQueue.push(chunk);
+  }
+  acknowledgeBrowserOnnxHostChunk(payload.requestId, payload.chunkId, true);
+}
+
+async function getBrowserOnnxHostConfig(settings = {}) {
+  const backendConfig = await loadBackendConfig();
+  if (!backendConfig.browserModelPath) {
+    throw new Error('Browser ONNX model path is not configured.');
+  }
+  return {
+    modelPath: resolveBrowserModelPath(backendConfig.browserModelPath),
+    threadCount: getBrowserOnnxThreadCount(settings),
+  };
+}
+
+async function prepareBrowserOnnxBackend(settings = {}) {
+  const config = await getBrowserOnnxHostConfig(settings);
+  await postBrowserOnnxHostRequest('warmup', { config });
+  return true;
+}
+
 /**
  * Get or create the audio context
  */
@@ -175,9 +576,61 @@ function hasRealtimePlayback() {
   return Boolean(currentRealtimeSession && currentRealtimeSession.active);
 }
 
+function createRealtimeOutputNode(ctx) {
+  const gainNode = ctx.createGain();
+  gainNode.gain.value = 1.0;
+  gainNode.connect(ctx.destination);
+  return gainNode;
+}
+
+function setRealtimeSessionMuted(session, muted) {
+  if (!session?.outputNode?.gain || !session.audioContext || session.audioContext.state === 'closed') {
+    return;
+  }
+  const now = session.audioContext.currentTime;
+  try {
+    session.outputNode.gain.cancelScheduledValues(now);
+    session.outputNode.gain.setValueAtTime(muted ? 0 : 1, now);
+  } catch (error) {
+    // Ignore gain update failures during teardown.
+  }
+}
+
 function resetRealtimeSession(session = currentRealtimeSession) {
   if (currentRealtimeSession === session) {
     currentRealtimeSession = null;
+  }
+}
+
+function stopRealtimeSessionPlayback(session = currentRealtimeSession) {
+  if (!session) {
+    return;
+  }
+  session.active = false;
+  session.nextPlaybackTime = 0;
+  setRealtimeSessionMuted(session, true);
+  if (session.scheduledSources instanceof Set) {
+    for (const source of session.scheduledSources) {
+      try {
+        source.stop(0);
+      } catch (error) {
+        // Source may have already ended.
+      }
+      try {
+        source.disconnect();
+      } catch (error) {
+        // Ignore disconnect failures during teardown.
+      }
+    }
+    session.scheduledSources.clear();
+  }
+  if (session.outputNode) {
+    try {
+      session.outputNode.disconnect();
+    } catch (error) {
+      // Ignore disconnect failures during teardown.
+    }
+    session.outputNode = null;
   }
 }
 
@@ -187,11 +640,47 @@ function resetAudioContext() {
   }
   const contextToClose = audioContext;
   audioContext = null;
+  if (contextToClose.state === 'running') {
+    contextToClose.suspend().catch(() => {});
+  }
   contextToClose.close().catch(() => {});
 }
 
+function trackRealtimeSource(session, source) {
+  if (!session?.scheduledSources) {
+    return;
+  }
+  session.scheduledSources.add(source);
+  source.addEventListener('ended', () => {
+    session.scheduledSources?.delete(source);
+  }, { once: true });
+}
+
+function getRealtimeBufferedSeconds(session) {
+  if (!session?.audioContext) {
+    return 0;
+  }
+  return Math.max(0, (session.nextPlaybackTime || session.audioContext.currentTime) - session.audioContext.currentTime);
+}
+
+async function waitForRealtimeSchedulingWindow(session, isStillActive, isPausedFn = () => false) {
+  while (isStillActive()) {
+    if (!session?.audioContext || !session.active || session.audioContext.state === 'closed') {
+      return false;
+    }
+    if (isPausedFn()) {
+      return true;
+    }
+    if (getRealtimeBufferedSeconds(session) <= MAX_REALTIME_BUFFERED_SECONDS) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, REALTIME_WAIT_POLL_MS));
+  }
+  return false;
+}
+
 function scheduleRealtimePcmChunk(session, pcmChunk, sampleRate, channels, speed) {
-  if (!session || !session.audioContext || pcmChunk.byteLength <= 0) {
+  if (!session || !session.audioContext || !session.active || session.audioContext.state === 'closed' || pcmChunk.byteLength <= 0) {
     return false;
   }
 
@@ -202,7 +691,12 @@ function scheduleRealtimePcmChunk(session, pcmChunk, sampleRate, channels, speed
   }
 
   const ctx = session.audioContext;
-  const audioBuffer = ctx.createBuffer(channels, totalFrames, sampleRate);
+  let audioBuffer;
+  try {
+    audioBuffer = ctx.createBuffer(channels, totalFrames, sampleRate);
+  } catch (error) {
+    return false;
+  }
   const view = new DataView(pcmChunk.buffer, pcmChunk.byteOffset, totalFrames * bytesPerFrame);
   for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
     const channelData = audioBuffer.getChannelData(channelIndex);
@@ -215,19 +709,57 @@ function scheduleRealtimePcmChunk(session, pcmChunk, sampleRate, channels, speed
   const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
   source.playbackRate.value = Math.max(0.1, speed || 1.0);
-  source.connect(ctx.destination);
+  source.connect(session.outputNode || ctx.destination);
   const now = ctx.currentTime;
   const startAt = Math.max(session.nextPlaybackTime || (now + session.initialPlaybackDelaySeconds), now + 0.02);
+  trackRealtimeSource(session, source);
   source.start(startAt);
   session.nextPlaybackTime = startAt + audioBuffer.duration / source.playbackRate.value;
   return true;
 }
 
-async function waitForRealtimePlaybackDrain(session, isStillActive) {
+function scheduleRealtimeFloatChunk(session, chunkData, sampleRate, channels, speed) {
+  if (!session || !session.audioContext || !session.active || session.audioContext.state === 'closed' || !chunkData || chunkData.length === 0) {
+    return false;
+  }
+  const frames = chunkData[0]?.length || 0;
+  if (frames <= 0) {
+    return false;
+  }
+
+  const ctx = session.audioContext;
+  let audioBuffer;
+  try {
+    audioBuffer = ctx.createBuffer(channels, frames, sampleRate);
+  } catch (error) {
+    return false;
+  }
+  for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
+    audioBuffer.copyToChannel(chunkData[channelIndex], channelIndex);
+  }
+
+  const source = ctx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.playbackRate.value = Math.max(0.1, speed || 1.0);
+  source.connect(session.outputNode || ctx.destination);
+  const now = ctx.currentTime;
+  const startAt = Math.max(session.nextPlaybackTime || (now + session.initialPlaybackDelaySeconds), now + 0.02);
+  trackRealtimeSource(session, source);
+  source.start(startAt);
+  session.nextPlaybackTime = startAt + audioBuffer.duration / source.playbackRate.value;
+  return true;
+}
+
+async function waitForRealtimePlaybackDrain(session, isStillActive, isPausedFn = () => false) {
   if (!session || !session.audioContext) {
     return;
   }
-  while (isStillActive() && session.audioContext && session.nextPlaybackTime > session.audioContext.currentTime + 0.02) {
+  while (isStillActive() && session.audioContext && session.audioContext.state !== 'closed'
+    && session.nextPlaybackTime > session.audioContext.currentTime + 0.02) {
+    if (isPausedFn()) {
+      await new Promise((resolve) => setTimeout(resolve, REALTIME_WAIT_POLL_MS));
+      continue;
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
@@ -257,7 +789,9 @@ async function playRealtimeAudioStream(text, voice, speed, settings, abortContro
     audioContext: ctx,
     nextPlaybackTime: 0,
     initialPlaybackDelaySeconds: normalizedSettings.initialPlaybackDelaySeconds,
-    active: true
+    active: true,
+    scheduledSources: new Set(),
+    outputNode: createRealtimeOutputNode(ctx)
   };
   currentRealtimeSession = session;
 
@@ -271,6 +805,10 @@ async function playRealtimeAudioStream(text, voice, speed, settings, abortContro
   try {
     try {
       while (isStillActive()) {
+        const canSchedule = await waitForRealtimeSchedulingWindow(session, isStillActive, () => isPaused);
+        if (!canSchedule) {
+          break;
+        }
         const { done, value } = await reader.read();
         if (done) {
           break;
@@ -307,10 +845,147 @@ async function playRealtimeAudioStream(text, voice, speed, settings, abortContro
       throw new Error('Realtime stream finished before any audio was scheduled');
     }
 
-    await waitForRealtimePlaybackDrain(session, isStillActive);
+    await waitForRealtimePlaybackDrain(session, isStillActive, () => isPaused);
     return { stopped: !isStillActive() };
   } finally {
     session.active = false;
+    stopRealtimeSessionPlayback(session);
+    resetRealtimeSession(session);
+  }
+}
+
+async function playBrowserOnnxAudioStream(text, voice, speed, settings, isStillActive) {
+  const normalizedSettings = normalizeSynthesisSettings(settings);
+  const config = await getBrowserOnnxHostConfig(normalizedSettings);
+
+  const ctx = getAudioContext();
+  await ctx.resume();
+  const session = {
+    audioContext: ctx,
+    nextPlaybackTime: 0,
+    initialPlaybackDelaySeconds: normalizedSettings.initialPlaybackDelaySeconds,
+    active: true,
+    scheduledSources: new Set(),
+    outputNode: createRealtimeOutputNode(ctx)
+  };
+  currentRealtimeSession = session;
+  let scheduledAnyAudio = false;
+  const synthRequestId = `browser-onnx-synth-${Date.now()}-${browserOnnxHostRequestCounter += 1}`;
+  session.browserOnnxRequestId = synthRequestId;
+
+  const controller = {
+    requestId: synthRequestId,
+    chunkQueue: [],
+    queueResolver: null,
+    completed: false,
+    cancelled: false,
+    error: null,
+    cancel() {
+      this.cancelled = true;
+      if (this.queueResolver) {
+        const resolve = this.queueResolver;
+        this.queueResolver = null;
+        resolve(null);
+      }
+    }
+  };
+  activeBrowserOnnxHostSyntheses.set(synthRequestId, controller);
+
+  const synthesisPromise = postBrowserOnnxHostRequest('synthesize', {
+    config,
+    text,
+    voiceName: voice,
+    settings: normalizedSettings,
+  }, synthRequestId)
+    .then((result) => {
+      controller.completed = true;
+      if (controller.queueResolver && controller.chunkQueue.length === 0) {
+        const resolve = controller.queueResolver;
+        controller.queueResolver = null;
+        resolve(null);
+      }
+      return result;
+    })
+    .catch((error) => {
+      controller.completed = true;
+      controller.error = error;
+      if (controller.queueResolver && controller.chunkQueue.length === 0) {
+        const resolve = controller.queueResolver;
+        controller.queueResolver = null;
+        resolve(null);
+      }
+      throw error;
+    });
+
+  try {
+    while (isStillActive()) {
+      const chunk = await getNextBrowserOnnxHostChunk(controller);
+      if (!chunk) {
+        if (controller.completed) {
+          break;
+        }
+        continue;
+      }
+      const canSchedule = await waitForRealtimeSchedulingWindow(session, isStillActive, () => isPaused);
+      if (!canSchedule || !isStillActive()) {
+        break;
+      }
+      const scheduled = scheduleRealtimeFloatChunk(
+        session,
+        chunk.chunkData,
+        chunk.sampleRate,
+        chunk.channels,
+        speed
+      );
+      scheduledAnyAudio = scheduledAnyAudio || scheduled;
+    }
+
+    let synthesisResult = null;
+    try {
+      synthesisResult = await synthesisPromise;
+    } catch (error) {
+      if (!controller.cancelled) {
+        throw error;
+      }
+    }
+
+    while (!controller.cancelled) {
+      const remainingChunk = await getNextBrowserOnnxHostChunk(controller);
+      if (!remainingChunk) {
+        break;
+      }
+      const canSchedule = await waitForRealtimeSchedulingWindow(session, isStillActive, () => isPaused);
+      if (!canSchedule || !isStillActive()) {
+        break;
+      }
+      const scheduled = scheduleRealtimeFloatChunk(
+        session,
+        remainingChunk.chunkData,
+        remainingChunk.sampleRate,
+        remainingChunk.channels,
+        speed
+      );
+      scheduledAnyAudio = scheduledAnyAudio || scheduled;
+    }
+
+    if (controller.error && !controller.cancelled) {
+      throw controller.error;
+    }
+
+    if (!scheduledAnyAudio && synthesisResult?.status !== 'cancelled' && isStillActive()) {
+      throw new Error('Browser ONNX synthesis finished before any audio was scheduled');
+    }
+
+    await waitForRealtimePlaybackDrain(session, isStillActive, () => isPaused);
+    return { stopped: !isStillActive() };
+  } finally {
+    controller.cancel();
+    activeBrowserOnnxHostSyntheses.delete(synthRequestId);
+    if (!controller.completed) {
+      void cancelBrowserOnnxHostSynthesis(synthRequestId);
+    }
+    session.active = false;
+    stopRealtimeSessionPlayback(session);
     resetRealtimeSession(session);
   }
 }
@@ -722,6 +1397,17 @@ async function synthesizeParagraph(text, voice, settings = {}) {
  */
 async function playParagraphStreamFirst(text, voice, settings = {}) {
   const normalizedSettings = normalizeSynthesisSettings(settings);
+  const backendConfig = await loadBackendConfig();
+  if (backendConfig.backend === 'browser_onnx') {
+    return playBrowserOnnxAudioStream(
+      text,
+      voice,
+      playbackSpeed,
+      normalizedSettings,
+      () => !shouldStop
+    );
+  }
+
   if (normalizedSettings.realtimeStreamingDecode) {
     const abortController = new AbortController();
     mainStreamAbortController = abortController;
@@ -849,6 +1535,16 @@ async function playParagraphStreamFirst(text, voice, settings = {}) {
  * Get paragraphs from server
  */
 async function getParagraphs(text) {
+  const backendConfig = await loadBackendConfig();
+  if (backendConfig.backend === 'browser_onnx') {
+    const normalizedText = String(text || '').replace(/\r/g, '\n');
+    const chunks = normalizedText
+      .split(/\n{2,}/)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean);
+    return chunks.length > 0 ? chunks : [String(text || '').trim()].filter(Boolean);
+  }
+
   const response = await fetchFromConfiguredServer('/paragraphs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1022,6 +1718,8 @@ function stopPlayback() {
   }
 
   if (hasRealtimePlayback()) {
+    void cancelBrowserOnnxHostSynthesis(currentRealtimeSession?.browserOnnxRequestId);
+    stopRealtimeSessionPlayback(currentRealtimeSession);
     resetRealtimeSession();
   }
   resetAudioContext();
@@ -1108,6 +1806,8 @@ function stopSelectionReading() {
   }
 
   if (hasRealtimePlayback()) {
+    void cancelBrowserOnnxHostSynthesis(currentRealtimeSession?.browserOnnxRequestId);
+    stopRealtimeSessionPlayback(currentRealtimeSession);
     resetRealtimeSession();
   }
   resetAudioContext();
@@ -1278,6 +1978,18 @@ async function speakSelection(voice, speed, settings = {}) {
     isReadingSelection = true;
 
     selectionStreamAbortController = new AbortController();
+    const backendConfig = await loadBackendConfig();
+
+    if (backendConfig.backend === 'browser_onnx') {
+      await playBrowserOnnxAudioStream(
+        selectedText,
+        voice,
+        effectivePlaybackSpeed,
+        synthesisSettings,
+        () => isReadingSelection
+      );
+      return;
+    }
 
     if (synthesisSettings.realtimeStreamingDecode) {
       try {
@@ -1499,6 +2211,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       currentAudioElement.playbackRate = playbackSpeed;
     }
     sendResponse({ status: 'speed_set', speed: playbackSpeed });
+  } else if (message.action === 'ping') {
+    sendResponse({ status: 'ready', buildId: CONTENT_SCRIPT_BUILD_ID });
   } else if (message.action === 'getPlaybackState') {
     sendResponse({
       isPlaying: (currentAudioElement !== null || hasRealtimePlayback()) && !isPaused,
@@ -1518,6 +2232,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.action === 'speakSelection') {
     speakSelection(message.voice, message.speed, message.settings || {});
     sendResponse({ status: 'started' });
+  } else if (message.action === 'prepareBrowserOnnx') {
+    prepareBrowserOnnxBackend(message.settings || {})
+      .then(() => sendResponse({ status: 'prepared' }))
+      .catch((error) => sendResponse({ status: 'error', error: error.message || String(error) }));
+    return true;
   }
 
   // Return true to indicate async response

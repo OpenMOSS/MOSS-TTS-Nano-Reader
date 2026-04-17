@@ -7,13 +7,33 @@ const DEFAULT_SERVER_CONFIG = {
   host: 'localhost',
   port: 5050
 };
+const DEFAULT_BROWSER_MODEL_VARIANT = 'fp32';
+const CONTENT_SCRIPT_BUILD_ID = '2026-04-16-browser-onnx-normalize-1';
+const SAMPLE_MODE_GREEDY = 'greedy';
+const SAMPLE_MODE_FIXED = 'fixed';
+const SAMPLE_MODE_FULL = 'full';
+const DEFAULT_BROWSER_MODEL_RELATIVE_PATHS = {
+  fp32: 'models'
+};
+const DEFAULT_BACKEND_CONFIG = {
+  backend: 'browser_onnx',
+  browserModelVariant: DEFAULT_BROWSER_MODEL_VARIANT,
+  browserModelPath: DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[DEFAULT_BROWSER_MODEL_VARIANT]
+};
+const EXTERNAL_BROWSER_MODEL_KEY = 'browser-onnx-external';
 
 // DOM Elements
 const serverStatus = document.getElementById('server-status');
+const backendSelect = document.getElementById('backend-select');
+const browserModelProfileSelect = document.getElementById('browser-model-profile');
+const browserModelPathInput = document.getElementById('browser-model-path');
+const btnApplyBackendConfig = document.getElementById('btn-apply-backend-config');
+const btnPrepareBrowserBackend = document.getElementById('btn-prepare-browser-backend');
 const serverHostSelect = document.getElementById('server-host');
 const serverPortInput = document.getElementById('server-port');
 const btnApplyServerConfig = document.getElementById('btn-apply-server-config');
 const btnResetServerConfig = document.getElementById('btn-reset-server-config');
+const btnOpenBrowserPoc = document.getElementById('btn-open-browser-poc');
 const voiceSelect = document.getElementById('voice-select');
 const btnReloadVoices = document.getElementById('btn-reload-voices');
 const btnToggleAddVoice = document.getElementById('btn-toggle-add-voice');
@@ -29,6 +49,8 @@ const speedControl = document.getElementById('speed-control');
 const speedValue = document.getElementById('speed-value');
 const startPosition = document.getElementById('start-position');
 const nowReadingValue = document.getElementById('now-reading-value');
+const preparedTextMeta = document.getElementById('prepared-text-meta');
+const preparedTextValue = document.getElementById('prepared-text-value');
 const readingTimeEl = document.getElementById('reading-time');
 const readingTimeValue = document.getElementById('reading-time-value');
 const btnScan = document.getElementById('btn-scan');
@@ -39,6 +61,7 @@ const progressContainer = document.getElementById('progress-container');
 const progressFill = document.getElementById('progress-fill');
 const progressText = document.getElementById('progress-text');
 const messageEl = document.getElementById('message');
+const sampleModeSelect = document.getElementById('sample-mode');
 const realtimeStreamingDecodeToggle = document.getElementById('realtime-streaming-decode');
 const enableWeTextProcessingToggle = document.getElementById('wetext-processing-enabled');
 const enableNormalizeTtsTextToggle = document.getElementById('normalize-tts-text-enabled');
@@ -51,6 +74,8 @@ const codecMaxBatchSizeInput = document.getElementById('codec-max-batch-size');
 const CUSTOM_GROUP_OPTION = '__custom__';
 
 const DEFAULT_TTS_SETTINGS = {
+  sampleMode: SAMPLE_MODE_FIXED,
+  doSample: true,
   realtimeStreamingDecode: true,
   enableWeTextProcessing: true,
   enableNormalizeTtsText: true,
@@ -70,6 +95,19 @@ let serverConnected = false;
 let currentTabId = null;
 let scannedParagraphs = [];
 let availableVoiceGroups = [];
+let popupBrowserRuntimeModulePromise = null;
+let popupBrowserRuntime = null;
+
+function normalizeSampleMode(rawSampleMode, rawDoSample = true) {
+  const normalized = String(rawSampleMode || '').trim();
+  if ([SAMPLE_MODE_FIXED, SAMPLE_MODE_FULL].includes(normalized)) {
+    return normalized;
+  }
+  if (normalized === 'greedy' || normalized === 'mixed3') {
+    return SAMPLE_MODE_FIXED;
+  }
+  return SAMPLE_MODE_FIXED;
+}
 
 const FALLBACK_VOICE_GROUPS = [
   {
@@ -104,6 +142,361 @@ function normalizeServerConfig(rawConfig = {}) {
   };
 }
 
+function getDefaultBrowserModelRelativePath(modelVariant = DEFAULT_BROWSER_MODEL_VARIANT) {
+  return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[modelVariant] || DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[DEFAULT_BROWSER_MODEL_VARIANT];
+}
+
+function normalizeBrowserModelVariant(rawVariant, rawPath = '') {
+  const trimmedVariant = String(rawVariant || '').trim();
+  if (trimmedVariant === 'fp32') {
+    return trimmedVariant;
+  }
+  return DEFAULT_BROWSER_MODEL_VARIANT;
+}
+
+function isAbsoluteFileSystemPath(pathValue) {
+  const normalized = String(pathValue || '').trim();
+  return /^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith('\\\\') || normalized.startsWith('/');
+}
+
+function isResourceUrl(pathValue) {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(String(pathValue || '').trim());
+}
+
+function normalizePackagedModelPath(pathValue) {
+  const parts = String(pathValue || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\/+/, '')
+    .split('/')
+    .filter(Boolean);
+  const resolvedParts = [];
+  for (const part of parts) {
+    if (part === '.') {
+      continue;
+    }
+    if (part === '..') {
+      if (resolvedParts.length > 0) {
+        resolvedParts.pop();
+      }
+      continue;
+    }
+    resolvedParts.push(part);
+  }
+  return resolvedParts.join('/');
+}
+
+function normalizeStoredBrowserModelPath(rawPath = '') {
+  const normalizedPath = String(rawPath || '').trim();
+  const lowered = normalizedPath.replace(/\\/g, '/').toLowerCase();
+  if (
+    lowered === 'models/browser_onnx_poc_dynamic_int8'
+    || lowered.endsWith('/models/browser_onnx_poc_dynamic_int8')
+  ) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  if (lowered === 'models/browser_onnx_poc' || lowered.endsWith('/models/browser_onnx_poc')) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  if (
+    lowered === 'models/moss-tts-nano-100m-onnx'
+    || lowered === 'models/moss-audio-tokenizer-nano-onnx'
+  ) {
+    return DEFAULT_BROWSER_MODEL_RELATIVE_PATHS.fp32;
+  }
+  return normalizedPath;
+}
+
+function resolveBrowserModelPath(browserModelPath) {
+  const normalizedPath = String(browserModelPath || '').trim();
+  if (!normalizedPath) {
+    return '';
+  }
+  if (isResourceUrl(normalizedPath)) {
+    return normalizedPath.replace(/\/+$/, '');
+  }
+  if (isAbsoluteFileSystemPath(normalizedPath)) {
+    return normalizedPath.replace(/[\\/]+$/, '');
+  }
+  const packagedPath = normalizePackagedModelPath(normalizedPath);
+  return chrome.runtime.getURL(packagedPath).replace(/\/+$/, '');
+}
+
+function normalizeBackendConfig(rawConfig = {}) {
+  const normalizedBackend = String(rawConfig?.backend || DEFAULT_BACKEND_CONFIG.backend).trim() === 'server'
+    ? 'server'
+    : 'browser_onnx';
+  const normalizedBrowserModelVariant = normalizeBrowserModelVariant(
+    rawConfig?.browserModelVariant,
+    normalizeStoredBrowserModelPath(rawConfig?.browserModelPath)
+  );
+  const normalizedBrowserModelPath = String(
+    normalizeStoredBrowserModelPath(rawConfig?.browserModelPath)
+      || getDefaultBrowserModelRelativePath(normalizedBrowserModelVariant) || ''
+  ).trim();
+  return {
+    backend: normalizedBackend,
+    browserModelVariant: normalizedBrowserModelVariant,
+    browserModelPath: normalizedBrowserModelPath
+  };
+}
+
+function getBrowserModelStore() {
+  const store = globalThis.NanoReaderBrowserModelStore || null;
+  if (!store) {
+    throw new Error('Browser model store helper is not available in this extension build.');
+  }
+  return store;
+}
+
+function isDefaultPackagedBrowserModelPath(pathValue = '') {
+  const normalized = normalizeStoredBrowserModelPath(pathValue);
+  return normalized === DEFAULT_BROWSER_MODEL_RELATIVE_PATHS[DEFAULT_BROWSER_MODEL_VARIANT];
+}
+
+async function packagedBrowserModelExists(pathValue = '') {
+  if (!isDefaultPackagedBrowserModelPath(pathValue)) {
+    return true;
+  }
+  const manifestUrl = chrome.runtime.getURL(
+    'models/MOSS-TTS-Nano-100M-ONNX/browser_poc_manifest.json'
+  );
+  try {
+    const response = await fetch(manifestUrl, { cache: 'no-store' });
+    return response.ok;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function maybeProvisionExternalBrowserModel(backendConfig) {
+  const normalized = normalizeBackendConfig(backendConfig);
+  if (normalized.backend !== 'browser_onnx') {
+    return normalized;
+  }
+  if (!isDefaultPackagedBrowserModelPath(normalized.browserModelPath)) {
+    return normalized;
+  }
+  if (await packagedBrowserModelExists(normalized.browserModelPath)) {
+    return normalized;
+  }
+
+  const store = getBrowserModelStore();
+  const progressHandler = (progress) => {
+    const message = String(progress?.message || 'Downloading browser_onnx models...').trim();
+    setServerStatus('checking', message);
+    if (progress?.phase === 'download' && Number.isFinite(progress?.fileIndex) && Number.isFinite(progress?.fileCount)) {
+      btnPrepareBrowserBackend.textContent = `Downloading ${progress.fileIndex}/${progress.fileCount}`;
+    }
+  };
+
+  let accessToken = normalizeMetadataText((await chrome.storage.local.get('huggingFaceToken')).huggingFaceToken);
+  let result;
+  try {
+    result = await store.ensureExternalBrowserOnnxModels({
+      key: EXTERNAL_BROWSER_MODEL_KEY,
+      accessToken,
+      onProgress: progressHandler
+    });
+  } catch (error) {
+    const message = error?.message || String(error);
+    if (!/status=401|invalid username or password/i.test(message)) {
+      throw error;
+    }
+    const promptedToken = normalizeMetadataText(
+      globalThis.prompt(
+        'The configured Hugging Face ONNX repos currently require access authentication. Paste a Hugging Face token to continue downloading:',
+        accessToken || ''
+      ) || ''
+    );
+    if (!promptedToken) {
+      throw new Error('A Hugging Face access token is required to download the browser_onnx model repositories.');
+    }
+    accessToken = promptedToken;
+    await chrome.storage.local.set({ huggingFaceToken: accessToken });
+    result = await store.ensureExternalBrowserOnnxModels({
+      key: EXTERNAL_BROWSER_MODEL_KEY,
+      accessToken,
+      onProgress: progressHandler,
+      forceDownload: true
+    });
+  }
+
+  const nextBackendConfig = await persistBackendConfig({
+    ...normalized,
+    browserModelPath: result.managedPath
+  });
+  applyBackendConfigToUi(nextBackendConfig);
+  showMessage(
+    'success',
+    result.downloaded
+      ? `Downloaded browser_onnx models into browser-managed storage "${result.label}" and switched to it.`
+      : `Using existing browser-managed browser_onnx models "${result.label}".`
+  );
+  return nextBackendConfig;
+}
+
+function setBrowserBackendActionAvailability(enabled) {
+  btnRead.disabled = !enabled;
+  btnScan.disabled = !enabled;
+  btnReloadVoices.disabled = !enabled;
+  btnToggleAddVoice.disabled = !enabled;
+}
+
+async function ensureBrowserOnnxReadyForUserAction({ prepareInActiveTab = false } = {}) {
+  let backendConfig = await persistBackendConfig(getBackendConfigFromUi());
+  if (backendConfig.backend !== 'browser_onnx') {
+    throw new Error('Switch backend to browser_onnx first');
+  }
+
+  const ttsSettings = getTtsSettingsFromUi();
+  backendConfig = await maybeProvisionExternalBrowserModel(backendConfig);
+  applyBackendConfigToUi(backendConfig);
+
+  const statusOk = await checkBrowserBackendStatus(backendConfig, ttsSettings);
+  if (!statusOk) {
+    throw new Error('Browser ONNX assets are not ready');
+  }
+
+  let tab = null;
+  if (prepareInActiveTab) {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) {
+      throw new Error('No active tab found');
+    }
+    currentTabId = tab.id;
+    await ensureContentScriptReady(tab);
+
+    const response = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tab.id, {
+        action: 'prepareBrowserOnnx',
+        settings: ttsSettings
+      }, (payload) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || 'Failed to prepare browser_onnx in active tab'));
+          return;
+        }
+        resolve(payload || {});
+      });
+    });
+
+    if (response.status !== 'prepared') {
+      throw new Error(response.error || 'Failed to prepare browser_onnx in active tab');
+    }
+  }
+
+  setServerStatus('connected', prepareInActiveTab ? 'browser_onnx prepared in current tab' : 'browser_onnx ready');
+  serverConnected = true;
+  setBrowserBackendActionAvailability(true);
+  return { backendConfig, ttsSettings, tab };
+}
+
+function isRestrictedTabUrl(url) {
+  const normalizedUrl = String(url || '').trim().toLowerCase();
+  return normalizedUrl.startsWith('chrome://')
+    || normalizedUrl.startsWith('edge://')
+    || normalizedUrl.startsWith('about:')
+    || normalizedUrl.startsWith('devtools://')
+    || normalizedUrl.startsWith('view-source:')
+    || normalizedUrl.startsWith('chrome-extension://');
+}
+
+function getRestrictedTabMessage(url) {
+  const normalizedUrl = String(url || '').trim();
+  return `Cannot access this page: ${normalizedUrl || 'unknown page'}. Switch to a normal web page or local file tab first.`;
+}
+
+async function pingContentScript(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+        return;
+      }
+      if (response?.status !== 'ready') {
+        resolve(null);
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+async function clearStaleContentScriptGuard(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      try {
+        delete globalThis.__NANO_READER_CONTENT_SCRIPT_LOADED__;
+      } catch (error) {
+        globalThis.__NANO_READER_CONTENT_SCRIPT_LOADED__ = false;
+      }
+    }
+  });
+}
+
+async function ensureContentScriptReady(tab) {
+  if (!tab?.id) {
+    throw new Error('No active tab found');
+  }
+  if (isRestrictedTabUrl(tab.url)) {
+    throw new Error(getRestrictedTabMessage(tab.url));
+  }
+  const pingResponse = await pingContentScript(tab.id);
+  if (pingResponse?.status === 'ready' && pingResponse.buildId === CONTENT_SCRIPT_BUILD_ID) {
+    return;
+  }
+  if (pingResponse?.status === 'ready' && pingResponse.buildId && pingResponse.buildId !== CONTENT_SCRIPT_BUILD_ID) {
+    throw new Error('Page still has an older Nano Reader content script. Refresh the page once, then try again.');
+  }
+  if (pingResponse?.status === 'ready' && !pingResponse.buildId) {
+    throw new Error('Page is using a legacy Nano Reader content script. Refresh the page once, then try again.');
+  }
+
+  try {
+    await clearStaleContentScriptGuard(tab.id);
+  } catch (error) {
+    console.debug('Clear stale content-script guard skipped:', error);
+  }
+
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content.js']
+  });
+
+  if (!(await pingContentScript(tab.id))) {
+    throw new Error('Could not connect to page reader script. Reload the page and try again.');
+  }
+}
+
+async function resolvePlaybackTargetTab() {
+  if (currentTabId) {
+    try {
+      const existingTab = await chrome.tabs.get(currentTabId);
+      if (existingTab?.id) {
+        await ensureContentScriptReady(existingTab);
+        return existingTab;
+      }
+    } catch (error) {
+      currentTabId = null;
+    }
+  }
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!activeTab?.id) {
+    throw new Error('No active tab found');
+  }
+  await ensureContentScriptReady(activeTab);
+  currentTabId = activeTab.id;
+  return activeTab;
+}
+
+async function sendPlaybackAction(action) {
+  const tab = await resolvePlaybackTargetTab();
+  await chrome.tabs.sendMessage(tab.id, { action });
+  currentTabId = tab.id;
+}
+
 function getServerBaseUrl(serverConfig = DEFAULT_SERVER_CONFIG) {
   const normalized = normalizeServerConfig(serverConfig);
   return `http://${normalized.host}:${normalized.port}`;
@@ -118,9 +511,20 @@ async function loadServerConfig() {
   return normalizeServerConfig(serverConfig);
 }
 
+async function loadBackendConfig() {
+  const { backendConfig } = await chrome.storage.local.get('backendConfig');
+  return normalizeBackendConfig(backendConfig);
+}
+
 async function persistServerConfig(serverConfig) {
   const normalized = normalizeServerConfig(serverConfig);
   await chrome.storage.local.set({ serverConfig: normalized });
+  return normalized;
+}
+
+async function persistBackendConfig(backendConfig) {
+  const normalized = normalizeBackendConfig(backendConfig);
+  await chrome.storage.local.set({ backendConfig: normalized });
   return normalized;
 }
 
@@ -130,11 +534,206 @@ function applyServerConfigToUi(serverConfig) {
   serverPortInput.value = String(normalized.port);
 }
 
+function applyBackendConfigToUi(backendConfig) {
+  const normalized = normalizeBackendConfig(backendConfig);
+  backendSelect.value = normalized.backend;
+  browserModelProfileSelect.value = normalized.browserModelVariant;
+  browserModelPathInput.value = normalized.browserModelPath;
+  syncBackendUi(normalized);
+}
+
 function getServerConfigFromUi() {
   return normalizeServerConfig({
     host: serverHostSelect.value,
     port: serverPortInput.value
   });
+}
+
+function getBackendConfigFromUi() {
+  return normalizeBackendConfig({
+    backend: backendSelect.value,
+    browserModelVariant: browserModelProfileSelect.value,
+    browserModelPath: browserModelPathInput.value
+  });
+}
+
+function syncBackendUi(backendConfig = getBackendConfigFromUi()) {
+  const normalized = normalizeBackendConfig(backendConfig);
+  const usingServer = normalized.backend === 'server';
+  document.querySelector('.server-connection-settings')?.classList.toggle('hidden', !usingServer);
+  browserModelProfileSelect.disabled = usingServer;
+  browserModelPathInput.disabled = usingServer;
+  btnPrepareBrowserBackend.disabled = usingServer;
+}
+
+function normalizeMetadataText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeUploadedDisplayName(value) {
+  const cleaned = normalizeMetadataText(value);
+  if (!cleaned) {
+    throw new Error('Display name is required');
+  }
+  if (cleaned.length > 80) {
+    throw new Error('Display name must be 80 characters or fewer');
+  }
+  return cleaned;
+}
+
+function normalizeUploadedVoiceGroup(value) {
+  const cleaned = normalizeMetadataText(value);
+  if (!cleaned) {
+    throw new Error('Group is required');
+  }
+  if (cleaned.length > 80) {
+    throw new Error('Group must be 80 characters or fewer');
+  }
+  return cleaned;
+}
+
+function slugifyVoiceIdBase(displayName) {
+  const asciiText = String(displayName)
+    .normalize('NFKD')
+    .replace(/[^\x00-\x7F]/g, '');
+  const slug = asciiText.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return slug || 'voice';
+}
+
+function buildUniqueVoiceId(displayName, existingVoiceIds = []) {
+  const normalizedExistingIds = new Set(
+    Array.from(existingVoiceIds || [], (voiceId) => String(voiceId || '').trim().toLowerCase()).filter(Boolean)
+  );
+  const baseSlug = slugifyVoiceIdBase(displayName);
+  let suffix = 1;
+  while (true) {
+    const candidate = `${baseSlug}-${String(suffix).padStart(3, '0')}`;
+    if (!normalizedExistingIds.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+    suffix += 1;
+  }
+}
+
+function normalizeBrowserVoiceRow(row) {
+  if (!row || !Array.isArray(row.prompt_audio_codes) || row.prompt_audio_codes.length === 0) {
+    return null;
+  }
+  const voice = normalizeMetadataText(row.voice || row.id || row.display_name);
+  if (!voice) {
+    return null;
+  }
+  return {
+    voice,
+    display_name: normalizeMetadataText(row.display_name) || voice,
+    group: normalizeMetadataText(row.group),
+    audio_file: normalizeMetadataText(row.audio_file),
+    prompt_audio_codes: row.prompt_audio_codes
+  };
+}
+
+async function getPopupBrowserRuntimeModule() {
+  if (!popupBrowserRuntimeModulePromise) {
+    popupBrowserRuntimeModulePromise = import(chrome.runtime.getURL('browser_onnx_runtime.js'));
+  }
+  return popupBrowserRuntimeModulePromise;
+}
+
+async function getPopupBrowserRuntime(ttsSettings = null, backendConfig = null) {
+  const resolvedBackendConfig = backendConfig ? normalizeBackendConfig(backendConfig) : await loadBackendConfig();
+  const resolvedTtsSettings = ttsSettings ? normalizeTtsSettings(ttsSettings) : normalizeTtsSettings(
+    (await chrome.storage.local.get('ttsSettings')).ttsSettings
+  );
+  if (!resolvedBackendConfig.browserModelPath) {
+    throw new Error('Browser ONNX model path is not configured.');
+  }
+  const runtimeModule = await getPopupBrowserRuntimeModule();
+  if (!popupBrowserRuntime) {
+    popupBrowserRuntime = runtimeModule.createBrowserOnnxTtsRuntime({
+      logger: (message) => console.debug('[browser_onnx popup]', message)
+    });
+  }
+  await popupBrowserRuntime.configure({
+    modelPath: resolveBrowserModelPath(resolvedBackendConfig.browserModelPath),
+    threadCount: resolvedTtsSettings.cpuThreads > 0
+      ? resolvedTtsSettings.cpuThreads
+      : (navigator.hardwareConcurrency || 4)
+  });
+  return popupBrowserRuntime;
+}
+
+async function loadBrowserUploadedVoices() {
+  const { browserUploadedVoices } = await chrome.storage.local.get('browserUploadedVoices');
+  return Array.isArray(browserUploadedVoices) ? browserUploadedVoices : [];
+}
+
+async function saveBrowserUploadedVoices(rows) {
+  await chrome.storage.local.set({ browserUploadedVoices: Array.isArray(rows) ? rows : [] });
+}
+
+async function handleBackendConfigChange() {
+  syncBackendUi(getBackendConfigFromUi());
+}
+
+function handleBrowserModelProfileChange() {
+  const nextVariant = normalizeBrowserModelVariant(browserModelProfileSelect.value);
+  browserModelPathInput.value = getDefaultBrowserModelRelativePath(nextVariant);
+  syncBackendUi(getBackendConfigFromUi());
+}
+
+async function handleApplyBackendConfig() {
+  const originalApplyText = btnApplyBackendConfig.textContent;
+  const originalPrepareText = btnPrepareBrowserBackend.textContent;
+  btnApplyBackendConfig.disabled = true;
+  btnPrepareBrowserBackend.disabled = true;
+  btnApplyBackendConfig.textContent = 'Applying...';
+
+  try {
+    const backendConfig = await persistBackendConfig(getBackendConfigFromUi());
+    const ttsSettings = getTtsSettingsFromUi();
+    applyBackendConfigToUi(backendConfig);
+    await refreshBackendStatusAndVoices({
+      preferredVoice: voiceSelect.value,
+      backendConfig,
+      ttsSettings
+    });
+    if (backendConfig.backend === 'browser_onnx') {
+      showMessage('success', 'Switched to browser_onnx backend');
+    } else {
+      const serverConfig = await loadServerConfig();
+      showMessage('success', `Switched to server backend: ${getServerBaseUrl(serverConfig)}`);
+    }
+  } catch (error) {
+    console.error('Apply backend config error:', error);
+    showMessage('error', error.message || 'Failed to update backend configuration');
+  } finally {
+    btnApplyBackendConfig.disabled = false;
+    syncBackendUi(getBackendConfigFromUi());
+    btnApplyBackendConfig.textContent = originalApplyText;
+    btnPrepareBrowserBackend.textContent = originalPrepareText;
+  }
+}
+
+async function handlePrepareBrowserBackend() {
+  const originalApplyText = btnApplyBackendConfig.textContent;
+  const originalPrepareText = btnPrepareBrowserBackend.textContent;
+  btnApplyBackendConfig.disabled = true;
+  btnPrepareBrowserBackend.disabled = true;
+  btnPrepareBrowserBackend.textContent = 'Preparing...';
+
+  try {
+    const { backendConfig, ttsSettings } = await ensureBrowserOnnxReadyForUserAction({ prepareInActiveTab: true });
+    await populateVoiceOptions(voiceSelect.value, null, backendConfig, ttsSettings);
+    showMessage('success', 'Loaded and prepared browser_onnx backend in the current tab');
+  } catch (error) {
+    console.error('Prepare browser backend error:', error);
+    showMessage('error', error.message || 'Failed to prepare browser_onnx backend');
+  } finally {
+    btnApplyBackendConfig.disabled = false;
+    syncBackendUi(getBackendConfigFromUi());
+    btnApplyBackendConfig.textContent = originalApplyText;
+    btnPrepareBrowserBackend.textContent = originalPrepareText;
+  }
 }
 
 function getFallbackVoiceGroups() {
@@ -156,25 +755,40 @@ function uniqueNonEmptyStrings(values = []) {
  */
 async function init() {
   // Load saved voice preference
-  const { voice, speed, ttsSettings, serverConfig } = await chrome.storage.local.get([
+  const { voice, speed, ttsSettings, serverConfig, backendConfig } = await chrome.storage.local.get([
     'voice',
     'speed',
     'ttsSettings',
-    'serverConfig'
+    'serverConfig',
+    'backendConfig'
   ]);
   const effectiveServerConfig = normalizeServerConfig(serverConfig);
+  const effectiveBackendConfig = normalizeBackendConfig(backendConfig);
   applyServerConfigToUi(effectiveServerConfig);
+  applyBackendConfigToUi(effectiveBackendConfig);
+  setPreparedTextPlaceholder();
   if (speed) {
     speedControl.value = speed;
     speedValue.textContent = `${speed}x`;
   }
   applyTtsSettingsToUi(normalizeTtsSettings(ttsSettings));
 
-  // Check server status
-  await checkServerStatus(effectiveServerConfig);
-  await populateVoiceOptions(voice, effectiveServerConfig);
+  await refreshBackendStatusAndVoices({
+    preferredVoice: voice,
+    serverConfig: effectiveServerConfig,
+    backendConfig: effectiveBackendConfig,
+    ttsSettings: normalizeTtsSettings(ttsSettings)
+  });
 
   // Set up event listeners
+  btnOpenBrowserPoc.addEventListener('click', () => {
+    chrome.runtime.openOptionsPage();
+  });
+  backendSelect.addEventListener('change', handleBackendConfigChange);
+  browserModelProfileSelect.addEventListener('change', handleBrowserModelProfileChange);
+  browserModelPathInput.addEventListener('change', handleBackendConfigChange);
+  btnApplyBackendConfig.addEventListener('click', handleApplyBackendConfig);
+  btnPrepareBrowserBackend.addEventListener('click', handlePrepareBrowserBackend);
   btnApplyServerConfig.addEventListener('click', handleApplyServerConfig);
   btnResetServerConfig.addEventListener('click', handleResetServerConfig);
   voiceSelect.addEventListener('change', saveVoicePreference);
@@ -184,6 +798,7 @@ async function init() {
   btnSaveVoice.addEventListener('click', handleSaveVoice);
   btnCancelAddVoice.addEventListener('click', closeAddVoicePanel);
   speedControl.addEventListener('input', handleSpeedChange);
+  sampleModeSelect.addEventListener('change', saveTtsSettings);
   realtimeStreamingDecodeToggle.addEventListener('change', handleRealtimeStreamingDecodeChange);
   enableWeTextProcessingToggle.addEventListener('change', saveTtsSettings);
   enableNormalizeTtsTextToggle.addEventListener('change', saveTtsSettings);
@@ -209,7 +824,7 @@ async function init() {
   }
 
   // Auto-scan on open if server is connected
-  if (serverConnected) {
+  if (effectiveBackendConfig.backend === 'browser_onnx' || serverConnected) {
     handleScan();
   }
 }
@@ -252,6 +867,65 @@ async function checkServerStatus(serverConfig = null) {
       `Server not running at ${serverBaseUrl}. Start it with: python server.py --port ${effectiveServerConfig.port}`
     );
   }
+}
+
+async function checkBrowserBackendStatus(backendConfig = null, ttsSettings = null) {
+  const effectiveBackendConfig = backendConfig ? normalizeBackendConfig(backendConfig) : await loadBackendConfig();
+  const effectiveTtsSettings = ttsSettings ? normalizeTtsSettings(ttsSettings) : normalizeTtsSettings(
+    (await chrome.storage.local.get('ttsSettings')).ttsSettings
+  );
+  if (!effectiveBackendConfig.browserModelPath) {
+    setServerStatus('disconnected', 'Browser ONNX path not configured');
+    serverConnected = false;
+    btnRead.disabled = true;
+    btnScan.disabled = true;
+    btnReloadVoices.disabled = true;
+    btnToggleAddVoice.disabled = true;
+    return false;
+  }
+
+  if (
+    isDefaultPackagedBrowserModelPath(effectiveBackendConfig.browserModelPath)
+    && !(await packagedBrowserModelExists(effectiveBackendConfig.browserModelPath))
+  ) {
+    setServerStatus('disconnected', 'Packaged browser_onnx models missing. Read/Save Voice/Load And Prepare will download them into browser-managed storage when needed.');
+    serverConnected = false;
+    setBrowserBackendActionAvailability(true);
+    return false;
+  }
+
+  try {
+    setServerStatus('checking', 'Checking browser_onnx assets...');
+    const runtime = await getPopupBrowserRuntime(effectiveTtsSettings, effectiveBackendConfig);
+    await runtime.ensureManifestLoaded();
+    setServerStatus('connected', 'browser_onnx ready');
+    serverConnected = true;
+    setBrowserBackendActionAvailability(true);
+    return true;
+  } catch (error) {
+    setServerStatus('disconnected', `browser_onnx offline: ${error.message || String(error)}`);
+    serverConnected = false;
+    setBrowserBackendActionAvailability(false);
+    showMessage('error', error.message || 'Failed to load browser ONNX assets');
+    return false;
+  }
+}
+
+async function refreshBackendStatusAndVoices({
+  preferredVoice = null,
+  serverConfig = null,
+  backendConfig = null,
+  ttsSettings = null
+} = {}) {
+  const effectiveBackendConfig = backendConfig ? normalizeBackendConfig(backendConfig) : await loadBackendConfig();
+  if (effectiveBackendConfig.backend === 'browser_onnx') {
+    const browserReady = await checkBrowserBackendStatus(effectiveBackendConfig, ttsSettings);
+    await populateVoiceOptions(preferredVoice, null, effectiveBackendConfig, ttsSettings, browserReady);
+    return;
+  }
+  const effectiveServerConfig = serverConfig ? normalizeServerConfig(serverConfig) : await loadServerConfig();
+  await checkServerStatus(effectiveServerConfig);
+  await populateVoiceOptions(preferredVoice, effectiveServerConfig, effectiveBackendConfig, ttsSettings);
 }
 
 function renderVoiceOptions(voices, preferredVoice, voiceMetadataRows = []) {
@@ -344,8 +1018,8 @@ function resetAddVoiceForm() {
 }
 
 function openAddVoicePanel() {
-  if (!serverConnected) {
-    showMessage('error', 'Server not connected');
+  if (!serverConnected && getBackendConfigFromUi().backend !== 'browser_onnx') {
+    showMessage('error', 'Current backend is not ready');
     return;
   }
   renderVoiceGroupOptions(availableVoiceGroups);
@@ -375,10 +1049,67 @@ function getSelectedVoiceGroup() {
   return rawGroup.replace(/\s+/g, ' ').trim();
 }
 
-async function populateVoiceOptions(savedVoice, serverConfig = null) {
+async function populateVoiceOptions(
+  savedVoice,
+  serverConfig = null,
+  backendConfig = null,
+  ttsSettings = null,
+  browserReady = null
+) {
   let availableVoices = [];
   let defaultVoice = 'Junhao';
   let voiceMetadataRows = [];
+  const effectiveBackendConfig = backendConfig ? normalizeBackendConfig(backendConfig) : await loadBackendConfig();
+
+  if (effectiveBackendConfig.backend === 'browser_onnx') {
+    const uploadedVoices = (await loadBrowserUploadedVoices())
+      .map(normalizeBrowserVoiceRow)
+      .filter(Boolean);
+    const isRuntimeReady = browserReady === null
+      ? await checkBrowserBackendStatus(effectiveBackendConfig, ttsSettings)
+      : browserReady;
+
+    if (isRuntimeReady) {
+      try {
+        const runtime = await getPopupBrowserRuntime(ttsSettings, effectiveBackendConfig);
+        await runtime.ensureManifestLoaded();
+        const builtinVoices = runtime.listBuiltinVoices().map((row) => ({
+          voice: row.voice,
+          display_name: row.display_name || row.voice,
+          group: row.group || '',
+          prompt_audio_codes: row.prompt_audio_codes,
+          audio_file: row.audio_file || ''
+        }));
+        voiceMetadataRows = [...builtinVoices, ...uploadedVoices];
+        availableVoices = voiceMetadataRows.map((row) => row.voice);
+        defaultVoice = voiceMetadataRows[0]?.voice || defaultVoice;
+        availableVoiceGroups = uniqueNonEmptyStrings(voiceMetadataRows.map((row) => row.group));
+      } catch (error) {
+        console.warn('Failed to load browser_onnx voice metadata:', error);
+      }
+    }
+
+    if (availableVoices.length === 0) {
+      voiceMetadataRows = uploadedVoices;
+      availableVoices = uploadedVoices.map((row) => row.voice);
+      availableVoiceGroups = uniqueNonEmptyStrings(uploadedVoices.map((row) => row.group));
+    }
+
+    if (availableVoices.length === 0) {
+      availableVoices = Array.from(voiceSelect.querySelectorAll('option')).map((option) => option.value);
+    }
+    if (availableVoiceGroups.length === 0) {
+      availableVoiceGroups = getFallbackVoiceGroups();
+    }
+
+    const effectiveVoice = renderVoiceOptions(availableVoices, savedVoice || defaultVoice, voiceMetadataRows);
+    renderVoiceGroupOptions(availableVoiceGroups);
+    if (effectiveVoice) {
+      chrome.storage.local.set({ voice: effectiveVoice });
+    }
+    return;
+  }
+
   const effectiveServerConfig = serverConfig ? normalizeServerConfig(serverConfig) : await loadServerConfig();
 
   if (serverConnected) {
@@ -431,8 +1162,9 @@ function saveVoicePreference() {
 }
 
 async function handleReloadVoices() {
-  if (!serverConnected) {
-    showMessage('error', 'Server not connected');
+  const requestedBackendConfig = getBackendConfigFromUi();
+  if (!serverConnected && requestedBackendConfig.backend !== 'browser_onnx') {
+    showMessage('error', 'Current backend is not ready');
     return;
   }
 
@@ -442,14 +1174,24 @@ async function handleReloadVoices() {
   btnReloadVoices.textContent = 'Reloading...';
 
   try {
-    await populateVoiceOptions(voiceSelect.value);
+    let backendConfig = await loadBackendConfig();
+    let ttsSettings = getTtsSettingsFromUi();
+    if (requestedBackendConfig.backend === 'browser_onnx') {
+      ({ backendConfig, ttsSettings } = await ensureBrowserOnnxReadyForUserAction());
+    }
+    await refreshBackendStatusAndVoices({
+      preferredVoice: voiceSelect.value,
+      backendConfig,
+      ttsSettings
+    });
     showMessage('success', 'Voice list reloaded');
   } catch (error) {
     console.error('Reload voices error:', error);
     showMessage('error', error.message || 'Failed to reload voices');
   } finally {
-    btnReloadVoices.disabled = !serverConnected;
-    btnToggleAddVoice.disabled = !serverConnected;
+    const keepBrowserButtonsEnabled = serverConnected || getBackendConfigFromUi().backend === 'browser_onnx';
+    btnReloadVoices.disabled = !keepBrowserButtonsEnabled;
+    btnToggleAddVoice.disabled = !keepBrowserButtonsEnabled;
     btnReloadVoices.textContent = originalButtonText;
   }
 }
@@ -457,8 +1199,11 @@ async function handleReloadVoices() {
 async function applyAndRefreshServerConfig(serverConfig, successType, successMessage) {
   const normalized = await persistServerConfig(serverConfig);
   applyServerConfigToUi(normalized);
-  await checkServerStatus(normalized);
-  await populateVoiceOptions(voiceSelect.value, normalized);
+  const backendConfig = await loadBackendConfig();
+  if (backendConfig.backend === 'server') {
+    await checkServerStatus(normalized);
+    await populateVoiceOptions(voiceSelect.value, normalized, backendConfig);
+  }
   showMessage(successType, successMessage || `Server connection updated to ${getServerBaseUrl(normalized)}`);
   return normalized;
 }
@@ -512,23 +1257,18 @@ async function handleResetServerConfig() {
 }
 
 async function handleSaveVoice() {
-  if (!serverConnected) {
-    showMessage('error', 'Server not connected');
-    return;
-  }
-
-  const voiceName = newVoiceNameInput.value.replace(/\s+/g, ' ').trim();
-  const groupName = getSelectedVoiceGroup();
+  let voiceName;
+  let groupName;
   const uploadedFile = newVoiceFileInput.files?.[0];
 
-  if (!voiceName) {
-    showMessage('error', 'Display name is required');
-    newVoiceNameInput.focus();
-    return;
-  }
-  if (!groupName) {
-    showMessage('error', 'Group is required');
-    if (newVoiceGroupSelect.value === CUSTOM_GROUP_OPTION) {
+  try {
+    voiceName = normalizeUploadedDisplayName(newVoiceNameInput.value);
+    groupName = normalizeUploadedVoiceGroup(getSelectedVoiceGroup());
+  } catch (error) {
+    showMessage('error', error.message || 'Invalid voice metadata');
+    if (!normalizeMetadataText(newVoiceNameInput.value)) {
+      newVoiceNameInput.focus();
+    } else if (newVoiceGroupSelect.value === CUSTOM_GROUP_OPTION) {
       newVoiceGroupCustomInput.focus();
     } else {
       newVoiceGroupSelect.focus();
@@ -548,44 +1288,95 @@ async function handleSaveVoice() {
   btnSaveVoice.textContent = 'Saving...';
 
   try {
-    const serverConfig = await loadServerConfig();
-    const formData = new FormData();
-    formData.append('name', voiceName);
-    formData.append('group', groupName);
-    formData.append('audio', uploadedFile);
+    let backendConfig = normalizeBackendConfig(getBackendConfigFromUi());
+    if (backendConfig.backend === 'browser_onnx') {
+      ({ backendConfig } = await ensureBrowserOnnxReadyForUserAction());
+      const runtime = await getPopupBrowserRuntime(getTtsSettingsFromUi(), backendConfig);
+      await runtime.ensureManifestLoaded();
+      await runtime.ensureCodecEncodeLoaded();
+      const existingVoices = [
+        ...runtime.listBuiltinVoices().map((row) => row.voice),
+        ...(await loadBrowserUploadedVoices()).map((row) => row.voice)
+      ];
+      const displayNames = new Set(
+        [
+          ...runtime.listBuiltinVoices().map((row) => row.display_name || row.voice),
+          ...(await loadBrowserUploadedVoices()).map((row) => row.display_name || row.voice)
+        ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean)
+      );
+      if (displayNames.has(voiceName.toLowerCase())) {
+        throw new Error(`Display name "${voiceName}" already exists`);
+      }
 
-    const response = await fetch(buildServerRequestUrl('/voices', serverConfig), {
-      method: 'POST',
-      body: formData,
-      signal: AbortSignal.timeout(20000)
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.error || 'Failed to save voice');
-    }
-
-    availableVoiceGroups = uniqueNonEmptyStrings(payload.voice_groups);
-    await populateVoiceOptions(payload.voice?.voice || voiceName);
-    if (payload.voice?.voice) {
-      voiceSelect.value = payload.voice.voice;
+      const promptAudioCodes = await runtime.encodeReferenceAudioFromFile(uploadedFile);
+      const voiceId = buildUniqueVoiceId(voiceName, existingVoices);
+      const uploadedVoices = (await loadBrowserUploadedVoices())
+        .map(normalizeBrowserVoiceRow)
+        .filter(Boolean);
+      const newRow = {
+        voice: voiceId,
+        display_name: voiceName,
+        group: groupName,
+        audio_file: uploadedFile.name || '',
+        prompt_audio_codes: promptAudioCodes
+      };
+      await saveBrowserUploadedVoices([...uploadedVoices, newRow]);
+      availableVoiceGroups = uniqueNonEmptyStrings([...availableVoiceGroups, groupName]);
+      await populateVoiceOptions(newRow.voice, null, backendConfig, getTtsSettingsFromUi(), true);
+      voiceSelect.value = newRow.voice;
       saveVoicePreference();
+      closeAddVoicePanel();
+      showMessage('success', `Saved voice "${voiceName}" for browser_onnx`);
+    } else {
+      if (!serverConnected) {
+        throw new Error('Current backend is not ready');
+      }
+      const serverConfig = await loadServerConfig();
+      const formData = new FormData();
+      formData.append('name', voiceName);
+      formData.append('group', groupName);
+      formData.append('audio', uploadedFile);
+
+      const response = await fetch(buildServerRequestUrl('/voices', serverConfig), {
+        method: 'POST',
+        body: formData,
+        signal: AbortSignal.timeout(20000)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || 'Failed to save voice');
+      }
+
+      availableVoiceGroups = uniqueNonEmptyStrings(payload.voice_groups);
+      await populateVoiceOptions(payload.voice?.voice || voiceName, serverConfig, backendConfig);
+      if (payload.voice?.voice) {
+        voiceSelect.value = payload.voice.voice;
+        saveVoicePreference();
+      }
+      closeAddVoicePanel();
+      showMessage('success', `Saved voice "${payload.voice?.display_name || voiceName}"`);
     }
-    closeAddVoicePanel();
-    showMessage('success', `Saved voice "${payload.voice?.display_name || voiceName}"`);
   } catch (error) {
     console.error('Save voice error:', error);
     showMessage('error', error.message || 'Failed to save voice');
   } finally {
     btnSaveVoice.disabled = false;
     btnCancelAddVoice.disabled = false;
-    btnReloadVoices.disabled = !serverConnected;
-    btnToggleAddVoice.disabled = !serverConnected;
+    const keepBrowserButtonsEnabled = serverConnected || getBackendConfigFromUi().backend === 'browser_onnx';
+    btnReloadVoices.disabled = !keepBrowserButtonsEnabled;
+    btnToggleAddVoice.disabled = !keepBrowserButtonsEnabled;
     btnSaveVoice.textContent = originalButtonText;
   }
 }
 
 function normalizeTtsSettings(rawSettings = {}) {
-  const normalized = { ...DEFAULT_TTS_SETTINGS, ...(rawSettings || {}) };
+  const source = rawSettings || {};
+  const normalized = { ...DEFAULT_TTS_SETTINGS, ...source };
+  normalized.sampleMode = normalizeSampleMode(
+    source.sampleMode !== undefined ? source.sampleMode : normalized.sampleMode,
+    source.doSample !== undefined ? source.doSample !== false : normalized.doSample !== false
+  );
+  normalized.doSample = true;
   normalized.realtimeStreamingDecode = Boolean(normalized.realtimeStreamingDecode);
   const legacyTextNormalizationEnabled = normalized.textNormalizationEnabled;
   normalized.enableWeTextProcessing = normalized.enableWeTextProcessing !== undefined
@@ -612,7 +1403,10 @@ function normalizeTtsSettings(rawSettings = {}) {
 }
 
 function getTtsSettingsFromUi() {
+  const sampleMode = normalizeSampleMode(sampleModeSelect.value, true);
   return normalizeTtsSettings({
+    sampleMode,
+    doSample: true,
     realtimeStreamingDecode: realtimeStreamingDecodeToggle.checked,
     enableWeTextProcessing: enableWeTextProcessingToggle.checked,
     enableNormalizeTtsText: enableNormalizeTtsTextToggle.checked,
@@ -627,6 +1421,7 @@ function getTtsSettingsFromUi() {
 
 function applyTtsSettingsToUi(settings) {
   const normalized = normalizeTtsSettings(settings);
+  sampleModeSelect.value = normalized.sampleMode;
   realtimeStreamingDecodeToggle.checked = normalized.realtimeStreamingDecode;
   enableWeTextProcessingToggle.checked = normalized.enableWeTextProcessing;
   enableNormalizeTtsTextToggle.checked = normalized.enableNormalizeTtsText;
@@ -712,6 +1507,33 @@ function setNowReadingPlaceholder(text = 'No active paragraph.') {
   nowReadingValue.classList.add('is-placeholder');
 }
 
+function setPreparedTextPlaceholder(text = 'No prepared text yet.', meta = 'No prepared text yet.') {
+  preparedTextValue.textContent = text;
+  preparedTextValue.classList.add('is-placeholder');
+  preparedTextMeta.textContent = meta;
+}
+
+function updatePreparedTextDisplay(message = {}) {
+  const preparedText = String(message.text || '').trim();
+  const method = String(message.normalizationMethod || 'none').trim() || 'none';
+  const warnings = Array.isArray(message.warnings) ? message.warnings.filter(Boolean) : [];
+  const wetextRequested = Boolean(message.wetextRequested);
+  const wetextApplied = Boolean(message.wetextApplied);
+  const wetextAvailable = Boolean(message.wetextAvailable);
+  const metaParts = [
+    `method=${method}`,
+    `wetext_requested=${wetextRequested}`,
+    `wetext_applied=${wetextApplied}`,
+    `wetext_available=${wetextAvailable}`
+  ];
+  if (warnings.length > 0) {
+    metaParts.push(`warnings=${warnings.join(' | ')}`);
+  }
+  preparedTextMeta.textContent = metaParts.join(' | ');
+  preparedTextValue.textContent = preparedText || 'Prepared text is empty.';
+  preparedTextValue.classList.toggle('is-placeholder', !preparedText);
+}
+
 function updateNowReadingDisplay(index, total = null) {
   const normalizedIndex = Number.parseInt(index, 10);
   if (!Number.isFinite(normalizedIndex) || normalizedIndex < 0) {
@@ -779,8 +1601,8 @@ function updateReadingTimeDisplay() {
  * Handle Scan button click - extract and show paragraphs
  */
 async function handleScan() {
-  if (!serverConnected) {
-    showMessage('error', 'Server not connected');
+  if (!serverConnected && getBackendConfigFromUi().backend !== 'browser_onnx') {
+    showMessage('error', 'Current backend is not ready');
     return;
   }
 
@@ -796,21 +1618,13 @@ async function handleScan() {
 
     currentTabId = tab.id;
 
-    // Ensure content script is loaded
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      });
-    } catch (e) {
-      // Script might already be loaded
-    }
+    await ensureContentScriptReady(tab);
 
     // Scan for readable elements (with DOM references for highlighting)
     const response = await new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tab.id, { action: 'scanElements' }, (resp) => {
         if (chrome.runtime.lastError) {
-          reject(new Error('Could not access page'));
+          reject(new Error(chrome.runtime.lastError.message || 'Could not access page'));
         } else {
           resolve(resp);
         }
@@ -874,16 +1688,22 @@ async function handleScan() {
  * Handle Read button click
  */
 async function handleRead() {
-  if (!serverConnected) {
-    showMessage('error', 'Server not connected');
-    return;
-  }
-
   hideMessage();
   setPlayingState(true);
   updateProgress(0, 'Starting...');
+  setPreparedTextPlaceholder('Waiting for prepared text...', 'Waiting for browser_onnx text preparation.');
 
   try {
+    const requestedBackendConfig = getBackendConfigFromUi();
+    let effectiveTtsSettings = getTtsSettingsFromUi();
+    if (requestedBackendConfig.backend === 'browser_onnx') {
+      const ensured = await ensureBrowserOnnxReadyForUserAction({ prepareInActiveTab: true });
+      effectiveTtsSettings = ensured.ttsSettings;
+      await populateVoiceOptions(voiceSelect.value, null, ensured.backendConfig, ensured.ttsSettings, true);
+    } else if (!serverConnected) {
+      throw new Error('Current backend is not ready');
+    }
+
     // Get the active tab
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -893,15 +1713,7 @@ async function handleRead() {
 
     currentTabId = tab.id;
 
-    // Ensure content script is loaded
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      });
-    } catch (e) {
-      // Script might already be loaded
-    }
+    await ensureContentScriptReady(tab);
 
     // Get start index
     const startIndex = parseInt(startPosition.value, 10) || 0;
@@ -909,8 +1721,7 @@ async function handleRead() {
     // If we have scanned paragraphs, use them directly
     if (scannedParagraphs.length > 0) {
       const voice = voiceSelect.value;
-      const settings = getTtsSettingsFromUi();
-      const speed = getEffectivePlaybackSpeed(settings);
+      const speed = getEffectivePlaybackSpeed(effectiveTtsSettings);
       updateNowReadingDisplay(startIndex, scannedParagraphs.length);
       chrome.tabs.sendMessage(tab.id, {
         action: 'readParagraphs',
@@ -918,7 +1729,7 @@ async function handleRead() {
         startIndex: startIndex,
         voice: voice,
         speed: speed,
-        settings: settings
+        settings: effectiveTtsSettings
       });
     } else {
       // Otherwise extract and read from beginning
@@ -938,14 +1749,13 @@ async function handleRead() {
         }
 
         const voice = voiceSelect.value;
-        const settings = getTtsSettingsFromUi();
-        const speed = getEffectivePlaybackSpeed(settings);
+        const speed = getEffectivePlaybackSpeed(effectiveTtsSettings);
         chrome.tabs.sendMessage(tab.id, {
           action: 'readText',
           text: response.text,
           voice: voice,
           speed: speed,
-          settings: settings
+          settings: effectiveTtsSettings
         });
       });
     }
@@ -960,32 +1770,38 @@ async function handleRead() {
 /**
  * Handle Pause/Resume button click
  */
-function handlePause() {
-  if (!currentTabId) return;
-
-  if (isPaused) {
-    // Resume playback
-    chrome.tabs.sendMessage(currentTabId, { action: 'resume' }).catch(() => {});
-    setPausedState(false);
-  } else {
-    // Pause playback
-    chrome.tabs.sendMessage(currentTabId, { action: 'pause' }).catch(() => {});
-    setPausedState(true);
+async function handlePause() {
+  const wasPaused = isPaused;
+  const nextPausedState = !wasPaused;
+  setPausedState(nextPausedState);
+  try {
+    if (wasPaused) {
+      await sendPlaybackAction('resume');
+    } else {
+      await sendPlaybackAction('pause');
+    }
+  } catch (error) {
+    setPausedState(!nextPausedState);
+    console.error('Pause/resume failed:', error);
+    showMessage('error', error.message || 'Pause/resume failed');
   }
 }
 
 /**
  * Handle Stop button click
  */
-function handleStop() {
-  if (currentTabId) {
-    chrome.tabs.sendMessage(currentTabId, { action: 'stop' }).catch(() => {});
-  }
+async function handleStop() {
   setPlayingState(false);
   setPausedState(false);
   setNowReadingPlaceholder();
   hideMessage();
   progressContainer.classList.add('hidden');
+  try {
+    await sendPlaybackAction('stop');
+  } catch (error) {
+    console.error('Stop failed:', error);
+    showMessage('error', error.message || 'Stop failed');
+  }
 }
 
 /**
@@ -994,10 +1810,15 @@ function handleStop() {
 function handleContentMessage(message, sender) {
   // Only handle messages from content scripts (they have a tab)
   if (!sender.tab) return;
+  currentTabId = sender.tab.id;
 
   switch (message.action) {
     case 'progress':
       updateProgress(message.percent, message.text);
+      break;
+
+    case 'preparedText':
+      updatePreparedTextDisplay(message);
       break;
 
     case 'playing':

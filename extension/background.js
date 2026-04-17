@@ -7,6 +7,61 @@
 // State tracking
 let activeTabId = null;
 
+function isRestrictedTabUrl(url) {
+  const normalizedUrl = String(url || '').trim().toLowerCase();
+  return normalizedUrl.startsWith('chrome://')
+    || normalizedUrl.startsWith('edge://')
+    || normalizedUrl.startsWith('about:')
+    || normalizedUrl.startsWith('devtools://')
+    || normalizedUrl.startsWith('view-source:')
+    || normalizedUrl.startsWith('chrome-extension://');
+}
+
+function pingContentScript(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: 'ping' }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(false);
+        return;
+      }
+      resolve(response?.status === 'ready');
+    });
+  });
+}
+
+async function ensureContentScriptReady(tab) {
+  if (!tab?.id) {
+    throw new Error('No active tab found');
+  }
+  if (isRestrictedTabUrl(tab.url)) {
+    throw new Error(`Cannot access this page: ${tab.url || 'unknown page'}`);
+  }
+  if (await pingContentScript(tab.id)) {
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        try {
+          delete globalThis.__NANO_READER_CONTENT_SCRIPT_LOADED__;
+        } catch (error) {
+          globalThis.__NANO_READER_CONTENT_SCRIPT_LOADED__ = false;
+        }
+      }
+    });
+  } catch (error) {
+    // Ignore guard reset failures and continue to inject.
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content.js']
+  });
+  if (!(await pingContentScript(tab.id))) {
+    throw new Error('Could not connect to page reader script');
+  }
+}
+
 /**
  * Forward stop command to the active tab's content script
  */
@@ -63,15 +118,7 @@ chrome.commands.onCommand.addListener(async (command) => {
  */
 async function startReadingFromShortcut(tab) {
   try {
-    // Ensure content script is loaded
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      });
-    } catch (e) {
-      // Script might already be loaded
-    }
+    await ensureContentScriptReady(tab);
 
     // Scan for readable elements (with DOM references for highlighting)
     const response = await new Promise((resolve, reject) => {

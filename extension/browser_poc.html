@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nano Reader Browser PoC</title>
+  <link rel="stylesheet" href="browser_poc.css">
+</head>
+<body>
+  <main class="layout">
+    <section class="panel hero">
+      <p class="eyebrow">CPU-only Browser ONNX PoC</p>
+      <h1>Nano Reader Browser PoC</h1>
+      <p class="lead">
+        This page runs the same browser ONNX runtime used by the extension backend. It supports built-in voices,
+        uploaded voice cloning, editable text, non-streaming synthesis, and realtime streaming decode on local CPU.
+      </p>
+      <p id="browser-info" class="meta"></p>
+    </section>
+
+    <section class="panel">
+      <h2>Model Source</h2>
+      <div class="grid two-up">
+        <label class="field wide">
+          <span>Local Browser ONNX Model Root</span>
+          <input
+            id="model-dir-path"
+            type="text"
+            spellcheck="false"
+            placeholder="models"
+          >
+        </label>
+        <label class="field">
+          <span>CPU Threads (0=auto)</span>
+          <input id="cpu-thread-count" type="number" min="0" step="1" value="4">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="btn-use-model-path" type="button">Use This Path</button>
+        <button id="btn-load-poc-assets" type="button">Load And Prepare</button>
+      </div>
+      <div class="actions">
+        <button id="btn-reload-voices" type="button">Reload Voices</button>
+      </div>
+      <p class="field-label">Selected Source</p>
+      <div id="model-dir-value" class="readonly">No path selected.</div>
+      <p class="meta">
+        The <code>Load And Prepare</code> button preloads tokenizer, ONNX sessions, and warm-up runs so synthesis does not pay the first-load penalty.
+        The packaged default models live under <code>extension/models/MOSS-TTS-Nano-100M-ONNX</code> and
+        <code>extension/models/MOSS-Audio-Tokenizer-Nano-ONNX</code> and load without file-URL permission.
+        If that packaged directory is missing, <code>Load And Prepare</code> will download the Hugging Face ONNX assets into browser-managed storage automatically.
+        Only manually entered external local paths require <code>Allow access to file URLs</code>.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Generation Options</h2>
+      <div class="grid two-up">
+        <label class="field">
+          <span>Sampling Mode</span>
+          <select id="sample-mode">
+            <option value="fixed">Fixed Sampled Frame (Default)</option>
+            <option value="full">Sample Full</option>
+          </select>
+        </label>
+        <div class="field checkbox-field">
+          <span>WeTextProcessing</span>
+          <label class="checkbox-label checkbox-card" for="wetext-processing-enabled">
+            <input id="wetext-processing-enabled" type="checkbox" checked>
+            <span>Enable WeTextProcessing</span>
+          </label>
+        </div>
+        <div class="field checkbox-field">
+          <span>Text Normalization</span>
+          <label class="checkbox-label checkbox-card" for="normalize-tts-text-enabled">
+            <input id="normalize-tts-text-enabled" type="checkbox" checked>
+            <span>Enable normalize_tts_text</span>
+          </label>
+        </div>
+        <label class="field">
+          <span>Initial Playback Delay (s)</span>
+          <input id="initial-playback-delay" type="number" min="0" step="0.01" value="0.08">
+        </label>
+        <label class="field">
+          <span>Attention Backend</span>
+          <select id="attn-implementation">
+            <option value="model_default">model_default</option>
+            <option value="sdpa">sdpa</option>
+            <option value="eager">eager</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Voice Clone Max Text Tokens</span>
+          <input id="voice-clone-max-text-tokens" type="number" min="25" step="1" value="75">
+        </label>
+        <label class="field">
+          <span>Max TTS Batch Size (0=auto)</span>
+          <input id="tts-max-batch-size" type="number" min="0" step="1" value="1">
+        </label>
+        <label class="field">
+          <span>Max Codec Batch Size (0=auto)</span>
+          <input id="codec-max-batch-size" type="number" min="0" step="1" value="0">
+        </label>
+      </div>
+      <p class="meta">
+        Realtime vs non-streaming is selected by the two run buttons below.
+        This PoC applies <code>Sampling Mode</code>,
+        <code>Enable normalize_tts_text</code>, <code>Initial Playback Delay</code>,
+        <code>CPU Threads</code>, and <code>Voice Clone Max Text Tokens</code>.
+      </p>
+      <p class="meta">
+        Under the <code>browser_onnx</code> backend, <code>Enable WeTextProcessing</code> is still not executable today.
+        The cached <code>.fst</code> files can be reused as assets, but browser inference still needs a browser-side OpenFst/WeText runtime before those graphs can actually run.
+      </p>
+      <p class="meta">
+        <code>Fixed Sampled Frame</code> uses a dedicated fast path with host-provided random numbers and graph-internal sampling.
+        Its fixed hyperparameters are text temp 1.0 / top-p 1.0 / top-k 50, audio temp 0.8 / top-p 0.95 / top-k 25 / repetition penalty 1.2.
+      </p>
+      <p class="meta">
+        <code>Attention Backend</code>, <code>Max TTS Batch Size</code>, and <code>Max Codec Batch Size</code>
+        are shown here for popup parity and shared settings sync, but the current browser ONNX PoC runtime does not consume them yet.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Voice</h2>
+      <div class="grid two-up">
+        <label class="field">
+          <span>Built-in / Uploaded Voice</span>
+          <select id="voice-select"></select>
+        </label>
+        <label class="field">
+          <span>Sample Sentence</span>
+          <select id="sample-select"></select>
+        </label>
+      </div>
+      <label class="field">
+        <span>Editable Text</span>
+        <textarea id="tts-text" rows="5" placeholder="Enter the text you want to synthesize."></textarea>
+      </label>
+      <div class="actions">
+        <button id="btn-run-non-streaming" type="button" disabled>Run Non-Streaming</button>
+        <button id="btn-run-streaming" type="button" disabled>Run Realtime Streaming Decode</button>
+        <button id="btn-stop-playback" type="button">Stop</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Upload Voice</h2>
+      <div class="grid two-up">
+        <label class="field">
+          <span>Display Name</span>
+          <input id="uploaded-voice-name" type="text" maxlength="80" placeholder="My Voice">
+        </label>
+        <label class="field">
+          <span>Group</span>
+          <input id="uploaded-voice-group" type="text" maxlength="80" placeholder="Custom Group">
+        </label>
+      </div>
+      <label class="field">
+        <span>Reference Audio</span>
+        <input id="uploaded-voice-file" type="file" accept=".wav,.mp3,.flac,.ogg,.m4a,audio/*">
+      </label>
+      <div class="actions">
+        <button id="btn-save-uploaded-voice" type="button">Encode And Save Uploaded Voice</button>
+      </div>
+      <p class="meta">
+        Uploaded voices are encoded locally into prompt audio codes and saved into extension storage, so the main plugin
+        can use the same custom voices under the <code>browser_onnx</code> backend.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>Status</h2>
+      <div id="status-value" class="readonly"></div>
+      <p class="field-label">Prepared Text</p>
+      <div id="prepared-text-meta" class="meta">No prepared text yet.</div>
+      <div id="prepared-text-value" class="readonly">No prepared text yet.</div>
+      <pre id="log-output" class="log-output"></pre>
+    </section>
+  </main>
+
+  <script src="browser_model_store.js"></script>
+  <script type="module" src="browser_poc_bundle.js"></script>
+</body>
+</html>

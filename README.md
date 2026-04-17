@@ -30,17 +30,21 @@ MOSS-TTS-Nano Reader is a local browser webpage reading application built on [MO
 * 2026.4.14: We release **Nano Reader**, a browser-focused local reading integration on top of **MOSS-TTS-Nano**.
 * 2026.4.10: We release **MOSS-TTS-Nano**. A demo Space is available at [OpenMOSS-Team/MOSS-TTS-Nano](https://huggingface.co/spaces/OpenMOSS-Team/MOSS-TTS-Nano). You can also view the demo and more details at [openmoss.github.io/MOSS-TTS-Nano-Demo/](https://openmoss.github.io/MOSS-TTS-Nano-Demo/).
 
-## Demo
+## Quick Install
 
-![Nano Reader demo](./assets/images/demo.jpg)
+Thanks to the efficient performance improvements of the newly released ONNX version of [MOSS-TTS-Nano](https://github.com/OpenMOSS/MOSS-TTS-Nano), we can now migrate the whole project and model stack directly into the browser, removing the need to start an extra local service.
 
-- Online Demo: [https://openmoss.github.io/MOSS-TTS-Nano-Demo/](https://openmoss.github.io/MOSS-TTS-Nano-Demo/)
-- Hugging Face Space: [OpenMOSS-Team/MOSS-TTS-Nano](https://huggingface.co/spaces/OpenMOSS-Team/MOSS-TTS-Nano)
+Here is a quick usage overview:
+
+1. Load `MOSS-TTS-Nano-Reader/extension` directly as the browser extension.
+2. It is recommended to pre-download [MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX) and [MOSS-TTS-Nano-100M-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX) into `MOSS-TTS-Nano-Reader\extension_test\models`.
+3. If the models are not prepared yet, open the extension's Browser ONNX PoC and click `Load And Prepare` to start downloading automatically.
+4. Once loading succeeds, the extension is ready to use.
 
 ## Contents
 
 - [News](#news)
-- [Demo](#demo)
+- [Quick Install](#quick-install)
 - [Introduction](#introduction)
   - [Main Features](#main-features)
 - [Supported Languages](#supported-languages)
