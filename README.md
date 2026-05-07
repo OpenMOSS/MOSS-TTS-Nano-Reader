@@ -37,7 +37,7 @@ Thanks to the efficient performance improvements of the newly released ONNX vers
 Here is a quick usage overview:
 
 1. Load `MOSS-TTS-Nano-Reader/extension` directly as the browser extension.
-2. It is recommended to pre-download [MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX) and [MOSS-TTS-Nano-100M-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX) into `MOSS-TTS-Nano-Reader\extension_test\models`.
+2. It is recommended to pre-download [MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX) and [MOSS-TTS-Nano-100M-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX) into `MOSS-TTS-Nano-Reader\extension\models`.
 3. If the models are not prepared yet, open the extension's Browser ONNX PoC and click `Load And Prepare` to start downloading automatically.
 4. Once loading succeeds, the extension is ready to use.
 
