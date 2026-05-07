@@ -32,7 +32,7 @@ MOSS-TTS-Nano Reader 是一个基于 [MOSS-TTS-Nano](https://github.com/OpenMOSS
 以下是快速使用简介：
 
 1. 直接在浏览器插件中选择加载 `MOSS-TTS-Nano-Reader/extension` 文件夹。
-2. 建议先将 [MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX)、[MOSS-TTS-Nano-100M-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX) 下载好放到 `MOSS-TTS-Nano-Reader\extension\models` 路径下。
+2. 建议先将 [MOSS-Audio-Tokenizer-Nano-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX)、[MOSS-TTS-Nano-100M-ONNX](https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX) 下载好放到 `MOSS-TTS-Nano-Reader/extension/models` 路径下。
 3. 如果没有下载好，可以打开插件的 Browser ONNX PoC，再点击 `Load And Prepare`，将会自动开始下载。
 4. 加载成功后，即可使用本插件。
 
